@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: setuhaul
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false

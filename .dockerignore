@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+setuhaul.db-wal
+setuhaul.db-shm
+.venv/

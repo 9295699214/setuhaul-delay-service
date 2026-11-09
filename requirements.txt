@@ -1,0 +1,6 @@
+pydantic>=2.5
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pytest>=8.0
+# optional: lets Claude read driver messages (set ANTHROPIC_API_KEY)
+anthropic>=0.40
