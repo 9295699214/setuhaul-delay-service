@@ -1,8 +1,10 @@
 """HTTP layer. Run with:  uvicorn app.api:app --reload
 (needs `pip install fastapi uvicorn`)."""
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from .db import connect, init_db
@@ -18,6 +20,53 @@ class MessageIn(BaseModel):
     phone: str
     text: str
     now: str | None = None   # override clock for demos on the 2026-08-04 snapshot
+
+
+UI_FILE = Path(__file__).resolve().parent / "static" / "index.html"
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def ui():
+    return UI_FILE.read_text(encoding="utf-8")
+
+
+@app.get("/drivers")
+def drivers():
+    """Shipments with their driver phone, for the demo UI."""
+    conn = connect()
+    try:
+        rows = conn.execute("""
+            SELECT sh.id, sh.facility_id, sh.status, sh.needs_reefer, sh.load_weight_kg,
+                   sh.unload_minutes, d.name AS driver, d.phone, v.reg_no
+            FROM shipments sh JOIN drivers d ON d.id = sh.driver_id
+            LEFT JOIN vehicles v ON v.id = sh.vehicle_id ORDER BY sh.id""").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.get("/board/{facility_id}")
+def board(facility_id: str, now: str):
+    """Every slot at a facility with its state: booked, held, blocked, past or free."""
+    conn = connect()
+    try:
+        docks = [dict(r) for r in conn.execute(
+            "SELECT id, name, supports_reefer, max_weight_kg, active FROM docks "
+            "WHERE facility_id=? ORDER BY id", (facility_id,))]
+        slots = conn.execute("""
+            SELECT s.id, s.dock_id, s.start_at, s.end_at,
+              (SELECT a.shipment_id FROM appointments a WHERE a.slot_id=s.id AND a.status='active') AS booked_by,
+              (SELECT h.shipment_id FROM slot_holds h WHERE h.slot_id=s.id AND h.status='active'
+                 AND h.expires_at > :now) AS held_by,
+              (SELECT b.reason FROM dock_blocks b WHERE b.dock_id=s.dock_id
+                 AND b.start_at < s.end_at AND b.end_at > s.start_at) AS blocked
+            FROM slots s JOIN docks d ON d.id = s.dock_id
+            WHERE d.facility_id = :fac AND s.end_at > s.start_at
+            ORDER BY s.dock_id, s.start_at""",
+            {"fac": facility_id, "now": now}).fetchall()
+        return {"docks": docks, "slots": [dict(r) for r in slots]}
+    finally:
+        conn.close()
 
 
 @app.get("/health")

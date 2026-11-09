@@ -1,5 +1,8 @@
 # SetuHaul driver delay service
 
+**Live demo:** https://setuhaul-6dsy.onrender.com · [API docs](https://setuhaul-6dsy.onrender.com/docs)
+(free plan: the first request after idle can take ~50 s)
+
 Drivers message SetuHaul when they run late. This service reads the
 message, finds compatible free dock slots, holds them, and confirms one. It
 stays correct when ten drivers want the same slot at the same moment.
@@ -29,6 +32,7 @@ Optional extras:
 | `app/scheduler.py` | Optional facility-wide scheduling tool |
 | `app/db.py` | 18-table schema, unique indexes, stand-in snapshot |
 | `app/api.py` | FastAPI endpoints |
+| `app/static/index.html` | Web UI: driver chat, live dock board, scheduling tool |
 | `analysis/data_issues.sql` | 15 data-quality checks, each a query |
 | `analysis/run_issues.py` | Runs the checks, writes the evidence report |
 | `eval.py` | Ladder scenarios + concurrency race, writes the measures report |
@@ -65,7 +69,7 @@ python -m venv .venv
 pip install -r requirements.txt
 uvicorn app.api:app --reload
 ```
-Open http://127.0.0.1:8000/docs and try `POST /message`:
+Open http://127.0.0.1:8000 for the web UI (driver chat, dock board, scheduler), or http://127.0.0.1:8000/docs and try `POST /message`:
 ```json
 {"conversation_id": "c1", "phone": "+919800000001",
  "text": "Stuck near Kotputli, 2 hrs late", "now": "2026-08-04 08:30"}
