@@ -71,7 +71,9 @@ def board(facility_id: str, now: str):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    from .agent import ACTIVE, get_extractor
+    get_extractor()                      # refresh which reader is active
+    return {"status": "ok", "message_reader": ACTIVE["name"], "model": ACTIVE["model"]}
 
 
 @app.post("/reset")

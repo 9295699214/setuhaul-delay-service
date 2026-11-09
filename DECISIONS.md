@@ -31,6 +31,12 @@ zero LLM calls. Swapping in the LLM changes only `Extraction`, which is
 validated by Pydantic. If the LLM returns bad JSON, the service falls back to
 the regex extractor (`agent.get_extractor`).
 
+**Provider.** OpenRouter (`OPENROUTER_API_KEY`) or Anthropic direct
+(`ANTHROPIC_API_KEY`), chosen by environment variable, with no code change.
+OpenRouter keeps the model swappable (`OPENROUTER_MODEL`) and is called with
+the standard library only. The model gets `temperature 0` and a JSON-only
+response format, because extraction should be repeatable.
+
 ## 2. Ask the driver vs look it up
 
 **Choice.** The driver is asked only for things the backend cannot know:

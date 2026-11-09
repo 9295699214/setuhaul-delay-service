@@ -20,7 +20,10 @@ python -m analysis.run_issues    # data issues → reports/data_issues_report.md
 Only Python 3.10+ and `pydantic` are needed (plus `pytest` for the tests).
 Optional extras:
 - `pip install fastapi uvicorn`, then `uvicorn app.api:app --reload` for the HTTP API
-- `pip install anthropic` and set `ANTHROPIC_API_KEY` to use Claude for message understanding
+- Message understanding by an LLM (optional; without a key the offline regex reader is used):
+  - **OpenRouter:** set `OPENROUTER_API_KEY` (and optionally `OPENROUTER_MODEL`, default `anthropic/claude-haiku-4.5`). No extra package needed.
+  - **Anthropic direct:** `pip install anthropic` and set `ANTHROPIC_API_KEY`.
+  - `GET /health` shows which reader is active.
 
 ## What's in the box
 

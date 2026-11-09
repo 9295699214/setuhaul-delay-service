@@ -13,7 +13,7 @@ import os
 import re
 from datetime import datetime, timedelta
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 FMT = "%Y-%m-%d %H:%M"
 
@@ -101,36 +101,91 @@ Times must be absolute 'YYYY-MM-DD HH:MM' in Asia/Kolkata, resolved against the 
 Use null for anything the driver did not say. Never guess facts the driver did not state."""
 
 
+def _user_content(text: str, now: str, offered: list[dict] | None) -> str:
+    context = f"Current time: {now}\n"
+    if offered:
+        context += "Options already offered (1-based): " + json.dumps(
+            [o["start_at"] + " " + o["dock_name"] for o in offered]) + "\n"
+    return context + "Driver message: " + text
+
+
+def _parse(raw: str) -> Extraction:
+    """Models sometimes wrap JSON in prose or ``` fences; keep the first {...}."""
+    m = re.search(r"\{.*\}", raw, re.S)
+    if not m:
+        raise ValueError("no JSON object in model reply")
+    return Extraction.model_validate_json(m.group(0))
+
+
 class LLMExtractor:
+    """Claude through the Anthropic SDK (needs `pip install anthropic`)."""
+    name = "anthropic"
+
     def __init__(self, model: str | None = None):
         import anthropic  # noqa: imported lazily so offline runs work
         self.client = anthropic.Anthropic()
         self.model = model or os.getenv("SETUHAUL_MODEL", "claude-haiku-5-5")
 
     def __call__(self, text: str, now: str, offered: list[dict] | None = None) -> Extraction:
-        context = f"Current time: {now}\n"
-        if offered:
-            context += "Options already offered (1-based): " + json.dumps(
-                [o["start_at"] + " " + o["dock_name"] for o in offered]) + "\n"
         msg = self.client.messages.create(
             model=self.model, max_tokens=300, system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": context + "Driver message: " + text}])
-        raw = msg.content[0].text.strip().removeprefix("```json").removesuffix("```")
-        return Extraction.model_validate_json(raw)
+            messages=[{"role": "user", "content": _user_content(text, now, offered)}])
+        return _parse(msg.content[0].text)
+
+
+class OpenRouterExtractor:
+    """Any model on OpenRouter (OpenAI-compatible chat completions API).
+    Uses only the standard library, so no extra package is needed."""
+    name = "openrouter"
+    URL = "https://openrouter.ai/api/v1/chat/completions"
+
+    def __init__(self, api_key: str | None = None, model: str | None = None, timeout: float = 15):
+        self.api_key = api_key or os.environ["OPENROUTER_API_KEY"]
+        self.model = model or os.getenv("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5")
+        self.timeout = timeout
+
+    def __call__(self, text: str, now: str, offered: list[dict] | None = None) -> Extraction:
+        import urllib.request
+        body = json.dumps({
+            "model": self.model, "max_tokens": 300, "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+                         {"role": "user", "content": _user_content(text, now, offered)}],
+        }).encode()
+        req = urllib.request.Request(self.URL, data=body, method="POST", headers={
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/9295699214/setuhaul-delay-service",
+            "X-Title": "SetuHaul driver delay service",
+        })
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            data = json.loads(resp.read())
+        return _parse(data["choices"][0]["message"]["content"])
+
+
+ACTIVE = {"name": "regex", "model": None}
 
 
 def get_extractor():
-    """Use Claude when available, otherwise the regex fallback."""
-    if os.getenv("ANTHROPIC_API_KEY"):
+    """Pick the message reader: OpenRouter if OPENROUTER_API_KEY is set, else
+    Claude via ANTHROPIC_API_KEY, else the offline regex reader. Any LLM
+    failure (network, bad JSON, invalid fields) falls back to regex."""
+    llm = None
+    if os.getenv("OPENROUTER_API_KEY"):
+        llm = OpenRouterExtractor()
+    elif os.getenv("ANTHROPIC_API_KEY"):
         try:
             llm = LLMExtractor()
-
-            def extract(text, now, offered=None):
-                try:
-                    return llm(text, now, offered)
-                except (ValidationError, Exception):   # bad JSON or API error
-                    return rule_extract(text, now)
-            return extract
         except ImportError:
-            pass
-    return lambda text, now, offered=None: rule_extract(text, now)
+            llm = None
+    if llm is None:
+        ACTIVE.update(name="regex", model=None)
+        return lambda text, now, offered=None: rule_extract(text, now)
+    ACTIVE.update(name=llm.name, model=llm.model)
+
+    def extract(text, now, offered=None):
+        try:
+            return llm(text, now, offered)
+        except Exception:          # network error, bad JSON, validation error
+            return rule_extract(text, now)
+    return extract
