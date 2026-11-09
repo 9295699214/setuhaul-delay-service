@@ -42,8 +42,8 @@
   main { display: grid; grid-template-columns: minmax(340px, 420px) 1fr; gap: 20px; padding: 20px 24px; }
   @media (max-width: 960px) {
     main { grid-template-columns: 1fr; padding: 14px; }
-    .chat { position: static; height: 620px; min-height: 0; }
-    header { position: static; }
+    main .chat { position: static; height: 620px; min-height: 0; }
+    body header { position: static; }
   }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
   .panel h2 { font-size: 14px; font-weight: 600; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line);
