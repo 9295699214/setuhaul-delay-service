@@ -30,8 +30,10 @@ Optional extras:
 
 | Path | What it is |
 |---|---|
-| `app/agent.py` | Free text → validated fields (Claude or regex fallback) |
-| `app/service.py` | Conversation workflow: identify → ETA → offer → confirm |
+| `app/agent.py` | Free text → validated fields (OpenRouter / Anthropic, regex fallback) |
+| `app/service.py` | Workflow mode (default): identify → ETA → offer → confirm, fixed in code |
+| `app/agent_mode.py` | Agent mode: the LLM chooses tools via tool calling; code guards each tool |
+| `app/phrasing.py` | LLM rewrites replies in the driver's language; code checks every fact |
 | `app/tools.py` | `find_options`, `hold_slot`, `confirm`: all capacity logic |
 | `app/scheduler.py` | Optional facility-wide scheduling tool |
 | `app/db.py` | 18-table schema, unique indexes, stand-in snapshot |
@@ -44,6 +46,12 @@ Optional extras:
 | `reports/` | Generated reports |
 | `DECISIONS.md` | Every design choice with reason and evidence |
 | `ARCHITECTURE.md` | Diagrams, flow, tables |
+
+## Workflow vs agent
+
+Both modes run on the same evaluation. Live with Claude Haiku 4.5: workflow 12/12, agent 11/12,
+both with zero false promises and zero double bookings; agent ~35% slower. See `DECISIONS.md` §1c and
+`reports/eval_report.md`. Run it yourself: `POST /admin/eval?mode=agent&rounds=3`, then `GET /admin/eval`.
 
 ## Results on the stand-in snapshot
 

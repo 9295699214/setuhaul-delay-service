@@ -55,11 +55,59 @@ database committed.
 merged option list, a 24-hour time without AM/PM, and an LLM timeout all fall
 back to the template. The booking is identical either way.
 
-**Why not LLM tool calling.** The model never picks which tool to run. The
-flow has four fixed steps (identify → ETA → offer → confirm), so a workflow
-is simpler to test and can't book by mistake. Tool calling would earn its
-place for open-ended operator requests ("move all reefer trucks after the
-outage"), not for this driver flow.
+## 1c. Workflow vs agent (LLM tool calling): built both, measured both
+
+**What was built.** `app/agent_mode.py` lets the LLM choose the tools
+(`identify_truck`, `report_delay`, `offer_slots`, `confirm_option`,
+`get_booking_status`, `escalate_to_ops`) through OpenRouter tool calling. Every
+tool is guarded in code: identity comes from the phone, a gate-in blocks new
+slots, ETA arithmetic is in code, `confirm_option` only accepts an option this
+conversation was offered, there's a step limit, an LLM outage leads to
+escalation, and replies are fact-checked. Switch per request (`"mode": "agent"`),
+with `AGENT_MODE=agent`, or with the toggle in the UI.
+
+**Measured live** (same 12 scenarios, 3 race rounds × 10 drivers, Claude Haiku 4.5
+via OpenRouter; full table in `reports/eval_report.md`):
+
+| | Workflow | Agent |
+|---|---|---|
+| Ladder passed | 12 / 12 | 11 / 12 |
+| False promises / double bookings | 0 / 0 | 0 / 0 |
+| Median time per message | 2.2 s | 3.4 s |
+| LLM-chosen tool calls per message | 0 | 1.5 |
+
+**What live testing showed the agent doing,** each stopped or caught by a guard:
+1. On a shared phone it picked a truck itself instead of asking.
+   `identify_truck` now only accepts a number the driver actually wrote.
+2. It sent its own computed `new_eta` alongside `delay_minutes`, and the
+   planned-ETA arithmetic would have been skipped. Delay now always wins.
+3. It ignored "truck already inside" and called `offer_slots` anyway (found by
+   a test). The gate guard now sits in both tools.
+4. It invented a `latest_end` the driver never said, and once asked the driver
+   for today's date. These were fixed in the prompt; they can't be fully guarded in code.
+5. When a hold expired, it silently re-offered new slots instead of telling the
+   driver the hold had lapsed (the one ladder miss). Nothing wrong was booked.
+
+**Decision.** The workflow stays the default for the driver booking path. It
+passes every scenario, is about 35% faster, and its behaviour doesn't depend
+on prompt wording. The agent mode is kept because the guards make it safe (zero
+false promises even when the model misbehaved), and it's the right base for
+open-ended operator requests ("move all reefer trucks after the outage") where
+a fixed flow can't anticipate the steps.
+
+**The lesson:** the guards, not the prompt, are what keep the agent correct.
+Items 1–3 were real model mistakes that code blocked; items 4–5 are where
+prompt-only control is weaker, and both are visible in the evaluation.
+
+## 1d. Hold policy under a delay wave
+
+With the LLM on, requests arrive spread over seconds instead of at one
+instant. The first driver then holds all 3 free compatible slots while
+choosing, and the next drivers find none and are escalated. Offline, 3 of 10
+drivers got slots per round; live, 1 of 10 did, in both modes. Correctness held
+(zero double bookings), but capacity was under-used for 2 minutes. Next step:
+hold fewer options when supply is scarce (e.g. hold 1 when 3 or fewer compatible
+slots are free) and release unchosen holds as soon as one is confirmed (already done).
 
 ## 2. Ask the driver vs look it up
 
