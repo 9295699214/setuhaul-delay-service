@@ -95,10 +95,21 @@ def rule_extract(text: str, now: str) -> Extraction:
 # ------------------------------------------------------------ LLM based
 
 SYSTEM_PROMPT = """You extract fields from a truck driver's message to a logistics company.
-Return ONLY a JSON object with keys: intent, delay_minutes, new_eta, earliest, latest_end, choice_index.
-intent is one of report_delay, choose_option, confirm, ask_status, unknown.
-Times must be absolute 'YYYY-MM-DD HH:MM' in Asia/Kolkata, resolved against the given current time.
-Use null for anything the driver did not say. Never guess facts the driver did not state."""
+Drivers write in English, Hindi or Hinglish. Return ONLY a JSON object with keys:
+intent, delay_minutes, new_eta, earliest, latest_end, choice_index.
+
+- intent: report_delay | choose_option | confirm | ask_status | unknown
+- delay_minutes: integer, when the driver says HOW LATE they are ("2 hrs late",
+  "do ghante late", "45 min der"). Do NOT convert this into new_eta; the backend
+  adds it to the planned arrival time, which you do not know.
+- new_eta: only when the driver states a CLOCK TIME of arrival ("reach by 3pm",
+  "8:15 tak pahunchunga"). Otherwise null.
+- earliest: start of a window the driver accepts ("anything after 7", "1 baje ke baad").
+- latest_end: when the driver must be finished ("leave by 9", "10 se pehle nikalna hai").
+- choice_index: 1-based option the driver picks ("2", "the second one", "doosra wala").
+Clock times are absolute 'YYYY-MM-DD HH:MM' in Asia/Kolkata, resolved against the given
+current time; a bare hour means the next such time after now. Use null for anything the
+driver did not say. Never guess facts the driver did not state."""
 
 
 def _user_content(text: str, now: str, offered: list[dict] | None) -> str:
