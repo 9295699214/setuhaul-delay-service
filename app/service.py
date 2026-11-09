@@ -9,7 +9,8 @@ import json
 from datetime import datetime
 
 from . import tools
-from .agent import get_extractor
+from .agent import get_extractor, get_phraser
+from .phrasing import phrase
 
 FMT = tools.FMT
 
@@ -19,9 +20,10 @@ def _hhmm(ts: str) -> str:
 
 
 class ConversationService:
-    def __init__(self, conn, extractor=None):
+    def __init__(self, conn, extractor=None, phraser="auto"):
         self.conn = conn
         self.extract = extractor or get_extractor()
+        self.phraser = get_phraser() if phraser == "auto" else phraser
 
     # -- persistence ---------------------------------------------------------
     def _load(self, cid):
@@ -44,6 +46,7 @@ class ConversationService:
     def handle(self, conversation_id: str, phone: str, text: str, now: str) -> dict:
         self._log(conversation_id, "in", text, now)
         result = self._handle(conversation_id, phone, text, now)
+        result = phrase(self.phraser, text, result)    # LLM wording, code-checked facts
         self._log(conversation_id, "out", result["reply"], now, result["action"])
         return result
 

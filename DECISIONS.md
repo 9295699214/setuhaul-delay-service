@@ -37,6 +37,30 @@ OpenRouter keeps the model swappable (`OPENROUTER_MODEL`) and is called with
 the standard library only. The model gets `temperature 0` and a JSON-only
 response format, because extraction should be repeatable.
 
+## 1b. LLM writes the reply wording; code owns the facts
+
+**Choice.** The workflow builds every reply as a template filled from the
+database (`service.py`). If an LLM is configured, `phrasing.py` asks it to
+rewrite that template in the driver's language (English, Hindi, Hinglish).
+`phrasing.check()` then requires the LLM version to keep every time
+(with AM/PM), every dock name, the option numbering and any truck number,
+and to add no new times. If the check or the LLM call fails, the template is
+sent. Turn it off with `LLM_REPLIES=0`.
+
+**Reason.** A reply is a promise. The driver gets a natural message in
+their own language, but the facts in it are guaranteed to be the ones the
+database committed.
+
+**Evidence.** `tests/test_phrasing.py`: a changed time, a dropped dock, a
+merged option list, a 24-hour time without AM/PM, and an LLM timeout all fall
+back to the template. The booking is identical either way.
+
+**Why not LLM tool calling.** The model never picks which tool to run. The
+flow has four fixed steps (identify → ETA → offer → confirm), so a workflow
+is simpler to test and can't book by mistake. Tool calling would earn its
+place for open-ended operator requests ("move all reefer trucks after the
+outage"), not for this driver flow.
+
 ## 2. Ask the driver vs look it up
 
 **Choice.** The driver is asked only for things the backend cannot know:

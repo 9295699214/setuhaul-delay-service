@@ -137,11 +137,14 @@ class LLMExtractor:
         self.client = anthropic.Anthropic()
         self.model = model or os.getenv("SETUHAUL_MODEL", "claude-haiku-5-5")
 
-    def __call__(self, text: str, now: str, offered: list[dict] | None = None) -> Extraction:
+    def chat(self, system: str, user: str, json_mode: bool = False, max_tokens: int = 300) -> str:
         msg = self.client.messages.create(
-            model=self.model, max_tokens=300, system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": _user_content(text, now, offered)}])
-        return _parse(msg.content[0].text)
+            model=self.model, max_tokens=max_tokens, system=system,
+            messages=[{"role": "user", "content": user}])
+        return msg.content[0].text
+
+    def __call__(self, text: str, now: str, offered: list[dict] | None = None) -> Extraction:
+        return _parse(self.chat(SYSTEM_PROMPT, _user_content(text, now, offered), json_mode=True))
 
 
 class OpenRouterExtractor:
@@ -155,15 +158,14 @@ class OpenRouterExtractor:
         self.model = model or os.getenv("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5")
         self.timeout = timeout
 
-    def __call__(self, text: str, now: str, offered: list[dict] | None = None) -> Extraction:
+    def chat(self, system: str, user: str, json_mode: bool = False, max_tokens: int = 300) -> str:
         import urllib.request
-        body = json.dumps({
-            "model": self.model, "max_tokens": 300, "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                         {"role": "user", "content": _user_content(text, now, offered)}],
-        }).encode()
-        req = urllib.request.Request(self.URL, data=body, method="POST", headers={
+        payload = {"model": self.model, "max_tokens": max_tokens, "temperature": 0,
+                   "messages": [{"role": "system", "content": system},
+                                {"role": "user", "content": user}]}
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        req = urllib.request.Request(self.URL, data=json.dumps(payload).encode(), method="POST", headers={
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/9295699214/setuhaul-delay-service",
@@ -171,24 +173,40 @@ class OpenRouterExtractor:
         })
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             data = json.loads(resp.read())
-        return _parse(data["choices"][0]["message"]["content"])
+        return data["choices"][0]["message"]["content"]
+
+    def __call__(self, text: str, now: str, offered: list[dict] | None = None) -> Extraction:
+        return _parse(self.chat(SYSTEM_PROMPT, _user_content(text, now, offered), json_mode=True))
 
 
 ACTIVE = {"name": "regex", "model": None}
+
+
+def get_llm():
+    """The configured LLM backend, or None (OpenRouter > Anthropic > none)."""
+    if os.getenv("OPENROUTER_API_KEY"):
+        return OpenRouterExtractor()
+    if os.getenv("ANTHROPIC_API_KEY"):
+        try:
+            return LLMExtractor()
+        except ImportError:
+            return None
+    return None
+
+
+def get_phraser():
+    """LLM that rewrites the code-built reply in the driver's language, or None.
+    Turn off with LLM_REPLIES=0."""
+    if os.getenv("LLM_REPLIES", "1") == "0":
+        return None
+    return get_llm()
 
 
 def get_extractor():
     """Pick the message reader: OpenRouter if OPENROUTER_API_KEY is set, else
     Claude via ANTHROPIC_API_KEY, else the offline regex reader. Any LLM
     failure (network, bad JSON, invalid fields) falls back to regex."""
-    llm = None
-    if os.getenv("OPENROUTER_API_KEY"):
-        llm = OpenRouterExtractor()
-    elif os.getenv("ANTHROPIC_API_KEY"):
-        try:
-            llm = LLMExtractor()
-        except ImportError:
-            llm = None
+    llm = get_llm()
     if llm is None:
         ACTIVE.update(name="regex", model=None)
         return lambda text, now, offered=None: rule_extract(text, now)

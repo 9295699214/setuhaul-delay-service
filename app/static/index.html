@@ -230,7 +230,7 @@ function onDriverChange() {
 function renderMsgs() {
   const c = convo[selected().id];
   if (!c.log.length) { $("msgs").innerHTML = `<p class="empty">No messages yet. Say how late you are, e.g. "2 hrs late, anything after 1pm".</p>`; return; }
-  $("msgs").innerHTML = c.log.map(m => `<div class="msg ${m.dir}">${esc(m.text)}${m.action ? `<br><span class="act">${m.action}</span>` : ""}<span class="meta">${m.at}</span></div>`).join("");
+  $("msgs").innerHTML = c.log.map(m => `<div class="msg ${m.dir}">${esc(m.text)}${m.action ? `<br><span class="act">${m.action}${m.source ? " · " + (m.source === "llm" ? "LLM wording" : "template") : ""}</span>` : ""}<span class="meta">${m.at}</span></div>`).join("");
   $("msgs").scrollTop = $("msgs").scrollHeight;
 }
 
@@ -251,7 +251,7 @@ async function send(text) {
   try {
     const r = await api("/message", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ conversation_id: c.id, phone: d.phone, text, now: now() }) });
-    c.log.push({ dir: "out", text: r.reply, action: r.action, at });
+    c.log.push({ dir: "out", text: r.reply, action: r.action, source: r.reply_source, at });
     if (r.action === "confirmed") toast(`Booked ${r.slot_id}`);
     if (r.action === "ask_vehicle") {   // phone shared: follow whichever truck the driver names next
       c.shared = true;

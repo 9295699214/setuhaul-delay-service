@@ -73,7 +73,9 @@ def board(facility_id: str, now: str):
 def health():
     from .agent import ACTIVE, get_extractor
     get_extractor()                      # refresh which reader is active
-    return {"status": "ok", "message_reader": ACTIVE["name"], "model": ACTIVE["model"]}
+    from .agent import get_phraser
+    return {"status": "ok", "message_reader": ACTIVE["name"], "model": ACTIVE["model"],
+            "llm_replies": get_phraser() is not None}
 
 
 @app.post("/reset")

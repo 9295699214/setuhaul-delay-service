@@ -23,6 +23,7 @@ Optional extras:
 - Message understanding by an LLM (optional; without a key the offline regex reader is used):
   - **OpenRouter:** set `OPENROUTER_API_KEY` (and optionally `OPENROUTER_MODEL`, default `anthropic/claude-haiku-4.5`). No extra package needed.
   - **Anthropic direct:** `pip install anthropic` and set `ANTHROPIC_API_KEY`.
+  - The same LLM also rewrites replies in the driver's language; a code check keeps every time and dock exact, else the template is sent (`LLM_REPLIES=0` turns this off).
   - `GET /health` shows which reader is active.
 
 ## What's in the box
