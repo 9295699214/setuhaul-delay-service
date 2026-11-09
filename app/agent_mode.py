@@ -37,11 +37,15 @@ language and script, briefly (max 3 short lines plus any option list), no emojis
 Use the tools to act. Rules:
 - Never state an ETA, slot time or dock that a tool did not return. Copy times (e.g. "12:00 PM")
   and dock names exactly as the tool gives them.
-- If several trucks share this phone, ask for the truck number, then call identify_truck.
+- If several trucks share this phone, ask the driver for the truck number, then call identify_truck
+  with the number they wrote. Never pick a truck yourself.
 - When the driver says how late they are or when they will arrive, call report_delay
   (use delay_minutes for "X hours/min late"; new_eta only for a stated clock time), then call
   offer_slots and list the returned options numbered exactly as given.
+- Pass earliest / latest_end to offer_slots ONLY if the driver stated such a limit. Never invent one.
+- "1 ghanta late", "do ghante", "45 min der" are delays: call report_delay right away.
 - If the driver only says they are late without how late, ask how late. Do not guess.
+  Never ask for the date; the backend knows it.
 - Only call confirm_option after options were offered and the driver picked one.
 - If no slots are available, tell the driver operations will call (escalate_to_ops).
 - Don't ask for things the tools already know (truck type, load, dock compatibility)."""
@@ -122,6 +126,10 @@ class AgentService:
 
     def t_identify_truck(self, st, truck_number=""):
         typed = tools.norm_reg(truck_number)
+        said = tools.norm_reg(" ".join(st["driver_texts"]))
+        if not typed or typed not in said:
+            return {"error": "The driver has not written this truck number. Ask them for it; do not guess.",
+                    "trucks_on_this_phone": [c["reg_no"] for c in st["candidates"]]}
         match = [c for c in st["candidates"] if c["reg_no"] and tools.norm_reg(c["reg_no"]) == typed]
         if len(match) != 1:
             return {"error": "No truck with that number on this phone.",
@@ -146,13 +154,15 @@ class AgentService:
             return err
         if blocked := self._gate_guard(st):
             return blocked
+        if delay_minutes is not None:
+            new_eta = None          # relative delay wins: the backend adds it to the planned ETA
         if new_eta:
             try:
                 datetime.strptime(new_eta, FMT)
             except ValueError:
                 return {"error": "new_eta must be 'YYYY-MM-DD HH:MM'"}
             eta = new_eta
-        elif delay_minutes is not None and 0 <= int(delay_minutes) <= 24 * 60:
+        elif delay_minutes is not None and 0 <= int(delay_minutes) <= 24 * 60:  # noqa: SIM114
             base = tools.current_eta(self.conn, st["sid"])
             eta = tools._add(max(base["eta"] if base else st["now"], st["now"]), int(delay_minutes))
         else:
@@ -276,6 +286,7 @@ class AgentService:
         st = {"cid": conversation_id, "phone": phone, "now": now, "sid": sid, "candidates": cands,
               "state": conv["state"], "offered": json.loads(conv["offered_json"]), "eta": None}
         history = self._history(conversation_id)
+        st["driver_texts"] = [m["content"] for m in history if m["role"] == "user"] + [text]
         self._log(conversation_id, "in", text, now)
 
         def context():

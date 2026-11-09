@@ -108,3 +108,16 @@ def test_bad_arguments_do_not_crash(conn):
     r = AgentService(conn, llm=s).handle("a9", "+919800000001", "very late", T("08:30"))
     assert all("error" in c["result"] for c in r["tool_calls"])
     assert r["action"] == "ask_eta"
+
+
+def test_cannot_guess_truck_on_shared_phone(conn):
+    s = Script([call("identify_truck", truck_number="GJ01AB1018")], "Which truck?")
+    r = AgentService(conn, llm=s).handle("g1", "+919800000018", "late by 1 hour", T("11:00"))
+    assert "do not guess" in r["tool_calls"][0]["result"]["error"]
+    assert r["action"] == "ask_vehicle"
+
+
+def test_delay_beats_model_computed_eta(conn):
+    s = Script([call("report_delay", delay_minutes=120, new_eta=T("10:30"))], "noted")
+    r = AgentService(conn, llm=s).handle("g2", "+919800000001", "2 hrs late", T("08:30"))
+    assert r["eta"] == T("12:00")          # planned 10:00 + 2h, not the model's 10:30
