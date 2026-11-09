@@ -175,6 +175,22 @@ class OpenRouterExtractor:
             data = json.loads(resp.read())
         return data["choices"][0]["message"]["content"]
 
+    def chat_tools(self, messages: list[dict], tools: list[dict], max_tokens: int = 400) -> dict:
+        """One tool-calling turn (OpenAI format). Returns the assistant message:
+        {"role": "assistant", "content": str|None, "tool_calls": [...]|None}."""
+        import urllib.request
+        payload = {"model": self.model, "max_tokens": max_tokens, "temperature": 0,
+                   "messages": messages, "tools": tools, "tool_choice": "auto"}
+        req = urllib.request.Request(self.URL, data=json.dumps(payload).encode(), method="POST", headers={
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/9295699214/setuhaul-delay-service",
+            "X-Title": "SetuHaul driver delay service",
+        })
+        with urllib.request.urlopen(req, timeout=max(self.timeout, 30)) as resp:
+            data = json.loads(resp.read())
+        return data["choices"][0]["message"]
+
     def __call__(self, text: str, now: str, offered: list[dict] | None = None) -> Extraction:
         return _parse(self.chat(SYSTEM_PROMPT, _user_content(text, now, offered), json_mode=True))
 

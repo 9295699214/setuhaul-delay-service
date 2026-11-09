@@ -52,7 +52,7 @@ def check(reply: str, facts: dict) -> tuple[bool, str]:
     for t in facts["times"]:
         if t not in times:
             return False, f"missing time {t}"
-    extra = times - set(facts["times"])
+    extra = times - set(facts["times"]) - {_norm_time(t) for t in facts.get("allowed_times", [])}
     if extra:
         return False, f"invented time {sorted(extra)}"
     if len(ANY_CLOCK_RE.findall(reply)) > len(TIME_RE.findall(reply)):

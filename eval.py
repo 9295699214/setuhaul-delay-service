@@ -18,6 +18,14 @@ from app import tools
 from app.db import connect, init_db
 from app.service import ConversationService
 
+
+def make_service(conn, mode: str = "workflow"):
+    """workflow: fixed steps in code. agent: the LLM picks tools (needs OPENROUTER_API_KEY)."""
+    if mode == "agent":
+        from app.agent_mode import AgentService
+        return AgentService(conn)
+    return ConversationService(conn)
+
 T = lambda hhmm: f"2026-08-04 {hhmm}"   # noqa: E731
 PH = lambda n: f"+9198000000{n:02d}"     # noqa: E731
 
@@ -86,11 +94,15 @@ def fresh_db() -> Path:
     return p
 
 
-def run_scenario(sc) -> dict:
+def run_scenario(sc, mode: str = "workflow") -> dict:
     db = fresh_db()
     conn = connect(db)
-    svc = ConversationService(conn)
-    results = [svc.handle("eval", sc["phone"], text, now) for text, now in sc["turns"]]
+    svc = make_service(conn, mode)
+    results, latencies = [], []
+    for text, now in sc["turns"]:
+        t0 = time.perf_counter()
+        results.append(svc.handle("eval", sc["phone"], text, now))
+        latencies.append(time.perf_counter() - t0)
     try:
         ok = bool(sc["check"](conn, results))
     except Exception as e:   # a broken check is a failure, not a crash
@@ -99,6 +111,8 @@ def run_scenario(sc) -> dict:
     false_promises = count_false_promises(conn)
     conn.close()
     return {"name": sc["name"], "rung": sc["rung"], "ok": ok, "turns": len(sc["turns"]),
+            "latency_s": latencies, "tool_calls": sum(len(r.get("tool_calls", [])) for r in results),
+            "llm_replies": sum(r.get("reply_source") == "llm" for r in results),
             "actions": [r["action"] for r in results], "false_promises": false_promises,
             "transcript": [(t, r["reply"]) for (t, _), r in zip(sc["turns"], results)]}
 
@@ -126,7 +140,7 @@ def count_double_bookings(conn) -> int:
 RACE_SHIPMENTS = ["SH-01", "SH-02", "SH-05", "SH-06", "SH-07", "SH-08", "SH-12", "SH-14", "SH-15", "SH-16"]
 
 
-def race_once(drivers: int = 10) -> dict:
+def race_once(drivers: int = 10, mode: str = "workflow") -> dict:
     """All drivers ask at the same instant for 16:00-17:00 at Jaipur."""
     db = fresh_db()
     setup = connect(db)
@@ -140,7 +154,7 @@ def race_once(drivers: int = 10) -> dict:
     def run(sid, phone):
         conn = connect(db)
         try:
-            svc = ConversationService(conn)
+            svc = make_service(conn, mode)
             barrier.wait()
             r1 = svc.handle(f"race-{sid}", phone, "1 hour late, after 4pm, leave by 5pm", T("08:00"))
             r2 = svc.handle(f"race-{sid}", phone, "1", T("08:01")) if r1["action"] == "offered" else r1
@@ -165,6 +179,55 @@ def race_once(drivers: int = 10) -> dict:
               "double_bookings": count_double_bookings(conn), "seconds": elapsed}
     conn.close()
     return result
+
+
+def run_all(mode: str = "workflow", rounds: int = 30) -> dict:
+    """Ladder + race for one mode, as a JSON-able summary."""
+    ladder = [run_scenario(s, mode) for s in SCENARIOS]
+    races = [race_once(mode=mode) for _ in range(rounds)]
+    agg = {k: sum(r[k] for r in races) for k in
+           ("confirmed", "escalated", "other", "same_slot_promised_twice", "false_promises", "double_bookings")}
+    lat = [x for r in ladder for x in r["latency_s"]]
+    msgs = sum(r["turns"] for r in ladder)
+    return {"mode": mode, "rounds": rounds,
+            "ladder_passed": sum(r["ok"] for r in ladder), "ladder_total": len(ladder),
+            "ladder": [{k: r[k] for k in ("rung", "name", "ok", "actions", "tool_calls", "llm_replies")} for r in ladder],
+            "false_promises": sum(r["false_promises"] for r in ladder) + agg["false_promises"],
+            "race": agg,
+            "median_latency_s": round(statistics.median(lat), 2) if lat else None,
+            "tool_calls_per_message": round(sum(r["tool_calls"] for r in ladder) / msgs, 2),
+            "llm_reply_share": round(sum(r["llm_replies"] for r in ladder) / msgs, 2)}
+
+
+def comparison_section() -> list[str]:
+    """Workflow vs agent, from JSON results saved in reports/ (agent mode needs a live
+    LLM, so its run is done on the server via POST /admin/eval and saved here)."""
+    import json
+    rep = Path(__file__).resolve().parent / "reports"
+    runs = {m: json.loads((rep / f"eval_{m}_llm.json").read_text())
+            for m in ("workflow", "agent") if (rep / f"eval_{m}_llm.json").exists()}
+    if len(runs) < 2:
+        return []
+    w, a = runs["workflow"], runs["agent"]
+    row = lambda label, f: f"| {label} | {f(w)} | {f(a)} |"   # noqa: E731
+    md = ["", "## Workflow vs agent (live, with the LLM on)", "",
+          f"Both runs on the deployed service with OpenRouter `{a.get('model', 'anthropic/claude-haiku-4.5')}`. "
+          "Workflow: LLM reads and words messages, code picks every step. "
+          "Agent: LLM also chooses which tool to call; code guards each tool.", "",
+          "| Measure | Workflow | Agent (tool calling) |", "|---|---|---|",
+          row("Ladder scenarios passed", lambda r: f"{r['ladder_passed']} / {r['ladder_total']}"),
+          row("False promises", lambda r: r["false_promises"]),
+          row("Same slot promised twice (race)", lambda r: r["race"]["same_slot_promised_twice"]),
+          row("Double bookings (race)", lambda r: r["race"]["double_bookings"]),
+          row("Race outcomes", lambda r: f"{r['race']['confirmed']} confirmed, {r['race']['escalated']} escalated, {r['race']['other']} other"),
+          row("Median time per message", lambda r: f"{r['median_latency_s']} s"),
+          row("Tool calls chosen by LLM per message", lambda r: r["tool_calls_per_message"]),
+          row("Replies in LLM wording (passed fact check)", lambda r: f"{round(r['llm_reply_share'] * 100)}%"),
+          "", "| Rung | Scenario | Workflow | Agent |", "|---|---|---|---|"]
+    for lw, la in zip(w["ladder"], a["ladder"]):
+        md.append(f"| {lw['rung']} | {lw['name']} | {'PASS' if lw['ok'] else 'FAIL'} | "
+                  f"{'PASS' if la['ok'] else 'FAIL'} ({' → '.join(la['actions'])}) |")
+    return md
 
 
 def main(rounds: int = 30):
@@ -203,6 +266,7 @@ def main(rounds: int = 30):
         md += [f"### {r['name']}", ""]
         for text, reply in r["transcript"]:
             md += [f"> **Driver:** {text}  ", f"> **SetuHaul:** {reply.replace(chr(10), ' / ')}", ""]
+    md += comparison_section()
     out = Path(__file__).resolve().parent / "reports" / "eval_report.md"
     out.parent.mkdir(exist_ok=True)
     out.write_text("\n".join(md) + "\n")

@@ -63,6 +63,7 @@
   .msg.in { align-self: flex-end; background: var(--driver); color: var(--bg); border-bottom-right-radius: 3px; }
   .msg.out { align-self: flex-start; background: var(--bot); border-bottom-left-radius: 3px; }
   .msg .meta { display: block; font: 11px var(--mono); opacity: .6; margin-top: 4px; }
+  .msg .trace { display: block; margin-top: 6px; font: 11px/1.4 var(--mono); opacity: .75; white-space: pre-wrap; }
   .msg .act { display: inline-block; font: 11px var(--mono); padding: 1px 6px; border-radius: 4px;
               background: var(--accent-soft); color: var(--accent); margin-top: 6px; }
   .empty { color: var(--muted); font-size: 13px; text-align: center; margin: auto; max-width: 280px; }
@@ -121,6 +122,12 @@
     <input id="clock" value="08:30" aria-label="Simulated time (HH:MM)">
     <button id="minus" title="Back 5 minutes">−5m</button>
     <button id="plus" title="Forward 5 minutes">+5m</button>
+  </label>
+  <label class="clock" title="Workflow: fixed steps in code. Agent: the LLM chooses which tool to call (guarded).">Mode
+    <select id="mode" style="font:13px inherit;padding:5px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)">
+      <option value="workflow">Workflow</option>
+      <option value="agent">Agent (tool calling)</option>
+    </select>
   </label>
   <button id="reset" title="Rebuild the snapshot">Reset data</button>
   <a href="/docs" target="_blank" style="font-size:13px">API docs</a>
@@ -230,7 +237,7 @@ function onDriverChange() {
 function renderMsgs() {
   const c = convo[selected().id];
   if (!c.log.length) { $("msgs").innerHTML = `<p class="empty">No messages yet. Say how late you are, e.g. "2 hrs late, anything after 1pm".</p>`; return; }
-  $("msgs").innerHTML = c.log.map(m => `<div class="msg ${m.dir}">${esc(m.text)}${m.action ? `<br><span class="act">${m.action}${m.source ? " · " + (m.source === "llm" ? "LLM wording" : "template") : ""}</span>` : ""}<span class="meta">${m.at}</span></div>`).join("");
+  $("msgs").innerHTML = c.log.map(m => `<div class="msg ${m.dir}">${esc(m.text)}${m.action ? `<br><span class="act">${m.mode === "agent" ? "agent · " : ""}${m.action}${m.source ? " · " + (m.source === "llm" ? "LLM wording" : "template") : ""}</span>` : ""}${m.trace && m.trace.length ? `<span class="trace">${m.trace.map(t => `→ ${esc(t.tool)}(${esc(Object.entries(t.args).map(([k, v]) => k + "=" + v).join(", "))}) ⇒ ${esc(t.result.status || t.result.error || "")}`).join("\n")}</span>` : ""}<span class="meta">${m.at}</span></div>`).join("");
   $("msgs").scrollTop = $("msgs").scrollHeight;
 }
 
@@ -250,8 +257,8 @@ async function send(text) {
   c.log.push({ dir: "in", text, at }); renderMsgs(); $("text").value = "";
   try {
     const r = await api("/message", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversation_id: c.id, phone: d.phone, text, now: now() }) });
-    c.log.push({ dir: "out", text: r.reply, action: r.action, source: r.reply_source, at });
+      body: JSON.stringify({ conversation_id: c.id, phone: d.phone, text, now: now(), mode: $("mode").value }) });
+    c.log.push({ dir: "out", text: r.reply, action: r.action, source: r.reply_source, mode: r.mode, trace: r.tool_calls, at });
     if (r.action === "confirmed") toast(`Booked ${r.slot_id}`);
     if (r.action === "ask_vehicle") {   // phone shared: follow whichever truck the driver names next
       c.shared = true;
@@ -312,6 +319,8 @@ async function runSchedule() {
 }
 
 $("driver").onchange = onDriverChange;
+$("mode").onchange = () => { convo = {}; onDriverChange(); toast($("mode").value === "agent" ? "Agent mode: the LLM picks the tools" : "Workflow mode: fixed steps in code"); };
+api("/health").then(h => { if (!h.agent_mode_available) { $("mode").querySelector('[value=agent]').disabled = true; $("mode").title = "Agent mode needs OPENROUTER_API_KEY"; } }).catch(() => {});
 $("compose").onsubmit = (e) => { e.preventDefault(); send($("text").value); };
 $("plus").onclick = () => shiftClock(5);
 $("minus").onclick = () => shiftClock(-5);
