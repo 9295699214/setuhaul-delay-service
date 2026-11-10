@@ -61,7 +61,7 @@ SCENARIOS = [
      "name": "'Late by one hour' is added to the plan and stated back", "phone": P(13),
      "turns": [("I am late by one hour.", "09:19")],
      "check": lambda c, r: r[0]["action"] == "offered" and r[0]["eta"] == T("11:00")
-        and "10:00 AM plus 60 min" in r[0]["reply"]},
+        and "10:00 AM plus 60 min" in r[0].get("template_reply", r[0]["reply"])},
     {"rung": 2, "case": "Reefer compatibility", "ref": "SHP1010",
      "name": "Reefer load offered only the reefer dock D5", "phone": P(10),
      "turns": [("Running 30 min late", "10:00")],
@@ -94,7 +94,7 @@ SCENARIOS = [
      "name": "Early truck at the gate keeps its 09:00 slot", "phone": P(3),
      "turns": [("I am already at the gate. Can I get a dock now instead of waiting for 9?", "08:22")],
      "check": lambda c, r: r[0]["action"] == "status" and appt(c, "SHP1003")["slot_id"] == "SLOT-JAI-002"
-        and "doesn't move you ahead" in r[0]["reply"]},
+        and "doesn't move you ahead" in r[0].get("template_reply", r[0]["reply"])},
     {"rung": 3, "case": "Late arrival already at yard + cancellation frees capacity", "ref": "SHP1004 / THR008 / APT1008",
      "name": "Late truck past grace re-slotted from now; freed slot offered first", "phone": P(4),
      "turns": [("I reached late and am in the yard. Has a new dock been assigned?", "09:40")],

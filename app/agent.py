@@ -128,8 +128,9 @@ SYSTEM_PROMPT = """You extract fields from a truck driver's message to a logisti
 Drivers write in English, Hindi or Hinglish. Return ONLY a JSON object with keys:
 intent, delay_minutes, new_eta, earliest, latest_end, choice_index, confidence, delay_reason, reference.
 
-- intent: report_delay (driver is/will be late) | ask_slots (only asking what is possible, e.g.
-  "what slots if I reach 12:45?") | ask_status ("is my slot active?", "has a dock been assigned?") |
+- intent: report_delay (driver is/will be late, or states their ETA as a fact, even if they also ask
+  about slots: "Reaching around 11:20. Any slot after 12?" is report_delay) | ask_slots (ONLY a
+  hypothetical question, e.g. "what slots are possible if I reach 12:45?") | ask_status ("is my slot active?", "has a dock been assigned?") |
   early_arrival ("I'm already at the gate") | choose_option | confirm | unknown
 - delay_minutes: integer, when the driver says HOW LATE they are ("2 hrs late",
   "do ghante late", "45 min der"). Do NOT convert this into new_eta; the backend
