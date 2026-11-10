@@ -1,47 +1,65 @@
-"""Early truck, late truck and a truck already unloading share one facility."""
+"""Scheduling tool on the real snapshot: in-dock, early, late, broken dock, priorities."""
 from app.scheduler import propose_schedule
+from conftest import T
 
 
-def by_sid(result):
-    return {p["shipment"]: p for p in result["plan"]}
+def plan(conn, now):
+    r = propose_schedule(conn, "FAC-JAI-01", T(now))
+    return r, {p["shipment"]: p for p in r["plan"]}
 
 
-def test_truck_in_progress_is_fixed(conn):
-    r = propose_schedule(conn, "AMD-WH", "2026-08-04 13:55")
-    assert r["fixed"][0]["shipment"] == "SH-20" and r["fixed"][0]["dock"] == "AMD-A4"
-    assert "SH-20" not in by_sid(r)
-    # nothing else uses A4 while SH-20 is unloading
-    assert all(not (p["dock"] == "AMD-A4" and p["start"] < "2026-08-04 14:50") for p in r["plan"])
+def no_overlaps(r):
+    taken = [(p["dock"], p["start"], p["end"]) for p in r["plan"]] + [(f["dock"], f["start"], f["end"]) for f in r["fixed"]]
+    for i, a in enumerate(taken):
+        for b in taken[i + 1:]:
+            if a[0] == b[0]:
+                assert a[2] <= b[1] or b[2] <= a[1], (a, b)
 
 
-def test_early_truck_served_now(conn):
-    p = by_sid(propose_schedule(conn, "AMD-WH", "2026-08-04 13:55"))["SH-21"]
-    assert p["start"] == "2026-08-04 13:55" and p["arrival_basis"] == "gate_in"
+def test_truck_unloading_is_fixed(conn):
+    r, by = plan(conn, "09:30")
+    assert r["fixed"][0]["shipment"] == "SHP1002" and r["fixed"][0]["dock"] == "D2"
+    assert "SHP1002" not in by
 
 
-def test_late_truck_not_scheduled_before_arrival(conn):
-    p = by_sid(propose_schedule(conn, "AMD-WH", "2026-08-04 13:55"))["SH-19"]
-    assert p["start"] >= "2026-08-04 14:20" and p["wait_min"] == 0
+def test_no_dock_double_use(conn):
+    for now in ("09:30", "10:15", "11:00"):
+        no_overlaps(propose_schedule(conn, "FAC-JAI-01", T(now)))
 
 
-def test_no_dock_overlaps_and_compatibility(conn):
-    r = propose_schedule(conn, "JAI-DC", "2026-08-04 08:00")
-    plan = r["plan"]
-    for i, a in enumerate(plan):
-        for b in plan[i + 1:]:
-            if a["dock"] == b["dock"]:
-                assert a["end"] <= b["start"] or b["end"] <= a["start"], (a, b)
-    reefer = by_sid(r)["SH-09"]
-    assert reefer["dock"] == "JAI-D3"                       # fixes the planted reefer-on-dry booking
-    assert all(p["dock"] != "JAI-D5" for p in plan)         # inactive dock
+def test_compatibility_respected(conn):
+    _, by = plan(conn, "10:15")
+    assert by["SHP1010"]["dock"] == "D5"                       # reefer
+    assert by["SHP1016"]["dock"] == "D6" and by["SHP1011"]["dock"] == "D6"   # heavy
+    assert by["SHP1005"]["dock"] in ("D2", "D4")                # 20.5 t
+    assert all(p["dock"] != "D3" or p["start"] >= T("13:00") for p in by.values())   # breakdown
 
 
-def test_keeps_promises_when_possible(conn):
-    r = by_sid(propose_schedule(conn, "JAI-DC", "2026-08-04 08:00"))
-    for sid in ("SH-01", "SH-03", "SH-04", "SH-05", "SH-06"):
-        assert r[sid]["changed"] is False, sid
+def test_yard_trucks_planned_from_now(conn):
+    _, by = plan(conn, "10:15")
+    for sid in ("SHP1003", "SHP1004", "SHP1005"):
+        assert by[sid]["start"] >= T("10:15") and by[sid]["arrival_basis"] == "gate-in"
 
 
-def test_shipment_without_eta_is_reported(conn):
-    r = propose_schedule(conn, "JAI-DC", "2026-08-04 08:00")
-    assert {"shipment": "SH-16", "reason": "no ETA and no gate-in"} in r["skipped"]
+def test_critical_truck_keeps_its_promise(conn):
+    _, by = plan(conn, "10:15")
+    assert by["SHP1009"]["changed"] is False and by["SHP1009"]["late_min"] == 0
+
+
+def test_no_feasible_and_not_departed_are_reported(conn):
+    r, _ = plan(conn, "10:15")
+    reasons = {s["shipment"]: s["reason"] for s in r["skipped"]}
+    assert "no feasible" in reasons["SHP1015"]                  # D5 maintenance after 18:00
+    assert "not departed" in reasons["SHP1018"]                 # no-show truck
+
+
+def test_long_unloads_get_extension(conn):
+    _, by = plan(conn, "10:15")
+    for sid in ("SHP1009", "SHP1014", "SHP1005"):               # 75-minute unloads in 60-minute slots
+        assert by[sid]["extension_slot_id"]
+
+
+def test_proposal_books_nothing(conn):
+    before = conn.execute("SELECT COUNT(*) FROM appointments").fetchone()[0]
+    propose_schedule(conn, "FAC-JAI-01", T("10:15"))
+    assert conn.execute("SELECT COUNT(*) FROM appointments").fetchone()[0] == before

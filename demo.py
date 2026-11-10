@@ -1,4 +1,4 @@
-"""Scripted demo: runs with no web server and no API key.
+"""Scripted demo on the FDE Academy snapshot (no server, no API key).
 
     python demo.py
 """
@@ -12,32 +12,26 @@ from app.service import ConversationService
 db = Path(tempfile.mkdtemp()) / "demo.db"
 init_db(db)
 conn = connect(db)
-svc = ConversationService(conn)
-T = lambda hhmm: f"2026-08-04 {hhmm}"  # noqa: E731
+svc = ConversationService(conn, phraser=None)
+T = lambda hhmm: f"2026-08-04T{hhmm}:00+05:30"   # noqa: E731
+P = lambda n: f"+91-90000100{n:02d}"              # noqa: E731
 
 
-def say(cid, phone, text, now):
-    print(f"\n[{now[-5:]}] DRIVER ({phone[-4:]}): {text}")
-    print("SETUHAUL: " + svc.handle(cid, phone, text, now)["reply"].replace("\n", "\n          "))
+def say(cid, n, text, hhmm):
+    print(f"\n[{hhmm}] DRV{n:03d}: {text}")
+    print("  SetuHaul: " + svc.handle(cid, P(n), text, T(hhmm))["reply"].replace("\n", "\n            "))
 
 
-print("=" * 70, "\nPART 1 - one driver at a time\n" + "=" * 70)
-say("c1", "+919800000001", "Stuck near Kotputli, 2 hrs late", T("08:30"))
-say("c1", "+919800000001", "the second one", T("08:31"))
+print("=" * 72, "\nDriver conversations (the guide's seeded messages)\n" + "=" * 72)
+say("c3", 3, "I am already at the gate. Can I get a dock now instead of waiting for 9?", "08:22")
+say("c5", 5, "Dock D3 is not working. What should I do?", "09:20")
+say("c12", 12, "Tyre repaired. I can reach 11:10. I need to leave the warehouse before 1:30 for another pickup.", "09:29")
+say("c12", 12, "1", "09:30")
+say("c7", 7, "Heavy trailer ETA 12:00. Original heavy-bay slot will be missed. What is next?", "09:39")
+say("c7", 7, "MH04HV4107", "09:40")
+say("c14", 14, "Origin released me late. ETA 11:25. This load is urgent. Can I get the first possible dock?", "09:44")
+say("c8", 8, "Is my 4 PM slot still active?", "10:12")
+say("c15", 15, "Evening traffic. ETA 6:30. Can the reefer unload tonight?", "16:24")
 
-say("c3", "+919800000003", "running 1.5 hours late, anything after 1pm", T("09:00"))
-say("c3", "+919800000003", "1", T("09:01"))
-
-say("c2", "+919800000002", "around 3 hours late, need to leave by 4pm", T("09:30"))
-
-say("c6", "+919800000006", "45 min late", T("10:00"))
-say("c6", "+919800000006", "first", T("10:05"))          # hold expired
-
-say("c15", "+919800000015", "I am 1 hour late", T("08:30"))  # gate says already inside
-
-say("c18", "+919800000018", "late by 1 hour", T("11:00"))   # phone shared by two drivers
-say("c18", "+919800000018", "GJ01 AB 1019", T("11:01"))
-say("c18", "+919800000018", "1", T("11:02"))
-
-print("\n" + "=" * 70, "\nPART 2 - scheduling tool: early, late and in-progress trucks\n" + "=" * 70)
-print(format_schedule(propose_schedule(conn, "AMD-WH", T("13:55"))))
+print("\n" + "=" * 72, "\nScheduling tool: Jaipur at 10:15\n" + "=" * 72)
+print(format_schedule(propose_schedule(conn, "FAC-JAI-01", T("10:15"))))

@@ -1,6 +1,6 @@
 """Run every query in data_issues.sql and write reports/data_issues_report.md.
 
-    python -m analysis.run_issues            # uses ./setuhaul.db (created if missing)
+    python -m analysis.run_issues            # the supplied snapshot (data/setuhaul_freight_operations.db)
     python -m analysis.run_issues path.db    # any SQLite file with the same tables
 """
 import re
@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.db import DEFAULT_DB, connect, init_db  # noqa: E402
+from app.db import PRISTINE_DB, connect  # noqa: E402
 
 SQL_FILE = ROOT / "analysis" / "data_issues.sql"
 
@@ -28,9 +28,7 @@ def load_queries(path=SQL_FILE) -> list[dict]:
     return out
 
 
-def run(db_path=DEFAULT_DB) -> list[dict]:
-    if not Path(db_path).exists():
-        init_db(db_path)
+def run(db_path=PRISTINE_DB) -> list[dict]:
     conn = connect(db_path)
     results = []
     for q in load_queries():
@@ -45,8 +43,9 @@ def run(db_path=DEFAULT_DB) -> list[dict]:
 def to_markdown(results) -> str:
     found = sum(1 for r in results if r["rows"])
     md = ["# Data issues report", "",
-          f"{len(results)} checks run, **{found} found problems**. "
-          "Each check is a query in `analysis/data_issues.sql`; the rows below are the evidence.", "",
+          f"{len(results)} checks run against the supplied snapshot (4 Aug 2026), **{found} found problems**. "
+          "Each check is a query in `analysis/data_issues.sql`; the rows below are the evidence. "
+          "Checks with no rows are guards that pass on this snapshot.", "",
           "| # | Check | Rows |", "|---|---|---|"]
     md += [f"| {r['n']} | {r['title']} | {len(r['rows'])} |" for r in results]
     for r in results:
@@ -63,7 +62,7 @@ def to_markdown(results) -> str:
 
 
 if __name__ == "__main__":
-    db = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_DB
+    db = Path(sys.argv[1]) if len(sys.argv) > 1 else PRISTINE_DB
     res = run(db)
     out = ROOT / "reports" / "data_issues_report.md"
     out.parent.mkdir(exist_ok=True)

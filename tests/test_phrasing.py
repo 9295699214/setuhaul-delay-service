@@ -59,10 +59,11 @@ def test_confirmed_reply_keeps_dock():
 
 
 def test_service_uses_phraser_but_booking_unchanged(conn):
-    fake = Fake("Haan ji, ho gaya: 12:00 PM, Jaipur Dock 1. Gate par aa jaiye.")
+    from conftest import P, T
+    fake = Fake("Haan ji, ho gaya: 12:00 PM, Dock D2. Gate par aa jaiye.")
     svc = ConversationService(conn, phraser=fake)
-    r1 = svc.handle("p1", "+919800000001", "2 hrs late", "2026-08-04 08:00")
+    r1 = svc.handle("p1", P(12), "Tyre repaired. I can reach 11:10.", T("09:29"))
     assert r1["action"] == "offered" and r1["reply_source"] == "template"   # fake text lacks the options
-    r2 = svc.handle("p1", "+919800000001", "1", "2026-08-04 08:01")
+    r2 = svc.handle("p1", P(12), "1", T("09:30"))
     assert r2["action"] == "confirmed" and r2["reply_source"] == "llm"
-    assert r2["slot_id"] == "JAI-D1-12"
+    assert r2["slot_id"] == "SLOT-JAI-019"

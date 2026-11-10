@@ -7,129 +7,123 @@
 <style>
   :root {
     --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1c19; --muted: #6b6a64; --line: #e3e1d9;
-    --accent: #0f6e56; --accent-soft: #e1f5ee; --driver: #1d1c19; --bot: #eef2ff;
+    --accent: #0f6e56; --accent-soft: #e1f5ee; --bot: #eef2ff;
     --free: #e8f5e3; --free-ink: #3b6d11; --booked: #dbe7f7; --booked-ink: #0c447c;
+    --pending: #f3e8fd; --pending-ink: #5b2a86; --inprog: #b5d4f4; --inprog-ink: #042c53;
     --held: #fdf0d8; --held-ink: #854f0b; --blocked: #f3dede; --blocked-ink: #791f1f;
-    --past: #efeeea; --past-ink: #a3a199; --mine: #0f6e56;
-    --radius: 10px; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --past: #efeeea; --past-ink: #a3a199; --mine: #0f6e56; --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #161614; --panel: #201f1c; --ink: #ecebe6; --muted: #9c9a92; --line: #33322e;
-      --accent: #5dcaa5; --accent-soft: #10342b; --driver: #ecebe6; --bot: #232a3d;
+      --accent: #5dcaa5; --accent-soft: #10342b; --bot: #232a3d;
       --free: #1e2d16; --free-ink: #97c459; --booked: #142a44; --booked-ink: #85b7eb;
+      --pending: #2c1d3d; --pending-ink: #c9a2ef; --inprog: #1c3d63; --inprog-ink: #cfe3f8;
       --held: #3a2a10; --held-ink: #efa94b; --blocked: #3d1a1a; --blocked-ink: #f09595;
       --past: #26251f; --past-ink: #6a6862; --mine: #5dcaa5;
     }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         background: var(--bg); color: var(--ink); }
-  header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--line);
-           background: var(--panel); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+  body { margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; align-items: center; gap: 14px; padding: 12px 22px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
   header h1 { font-size: 18px; font-weight: 600; margin: 0; }
   header h1 span { color: var(--accent); }
-  header .sub { color: var(--muted); font-size: 13px; }
-  header .spacer { flex: 1; }
-  .clock { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
-  .clock input { font: 14px var(--mono); padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
-                 background: var(--bg); color: var(--ink); width: 92px; }
-  button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 7px; border: 1px solid var(--line);
-           background: var(--panel); color: var(--ink); cursor: pointer; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .spacer { flex: 1; }
+  .ctl { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .ctl input, .ctl select { font: 13px var(--mono); padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); }
+  .ctl input { width: 70px; }
+  button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
   button:hover { border-color: var(--muted); }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
-  main { display: grid; grid-template-columns: minmax(340px, 420px) 1fr; gap: 20px; padding: 20px 24px; }
-  @media (max-width: 960px) {
-    main { grid-template-columns: 1fr; padding: 14px; }
-    main .chat { position: static; height: 620px; min-height: 0; }
-    body header { position: static; }
-  }
+  main { display: grid; grid-template-columns: minmax(340px, 430px) 1fr; gap: 18px; padding: 18px 22px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
-  .panel h2 { font-size: 14px; font-weight: 600; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line);
-              display: flex; align-items: center; gap: 8px; }
+  .panel h2 { font-size: 14px; font-weight: 600; margin: 0; padding: 11px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .panel h2 .hint { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: auto; }
-
-  /* chat */
-  .chat { display: flex; flex-direction: column; height: calc(100vh - 110px); min-height: 560px; position: sticky; top: 76px; }
-  .who { padding: 12px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
-  .who select { font: inherit; padding: 7px 8px; border-radius: 7px; border: 1px solid var(--line);
-                background: var(--bg); color: var(--ink); width: 100%; }
+  .chat { display: flex; flex-direction: column; height: calc(100vh - 100px); min-height: 560px; position: sticky; top: 70px; }
+  .who { padding: 11px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+  .who select { font: inherit; padding: 7px 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; }
   .facts { display: flex; flex-wrap: wrap; gap: 6px; }
   .tag { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--bg); border: 1px solid var(--line); color: var(--muted); }
   .tag.warn { background: var(--held); color: var(--held-ink); border-color: transparent; }
-  .msgs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-  .msg { max-width: 85%; padding: 9px 12px; border-radius: 12px; white-space: pre-wrap; font-size: 14px; }
-  .msg.in { align-self: flex-end; background: var(--driver); color: var(--bg); border-bottom-right-radius: 3px; }
+  .msgs { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 88%; padding: 9px 12px; border-radius: 12px; white-space: pre-wrap; font-size: 14px; }
+  .msg.in { align-self: flex-end; background: var(--ink); color: var(--bg); border-bottom-right-radius: 3px; }
   .msg.out { align-self: flex-start; background: var(--bot); border-bottom-left-radius: 3px; }
   .msg .meta { display: block; font: 11px var(--mono); opacity: .6; margin-top: 4px; }
+  .msg .act { display: inline-block; font: 11px var(--mono); padding: 1px 6px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); margin-top: 6px; }
   .msg .trace { display: block; margin-top: 6px; font: 11px/1.4 var(--mono); opacity: .75; white-space: pre-wrap; }
-  .msg .act { display: inline-block; font: 11px var(--mono); padding: 1px 6px; border-radius: 4px;
-              background: var(--accent-soft); color: var(--accent); margin-top: 6px; }
-  .empty { color: var(--muted); font-size: 13px; text-align: center; margin: auto; max-width: 280px; }
-  .quick { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; }
-  .quick button { font-size: 12px; padding: 4px 10px; border-radius: 99px; }
-  .compose { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
-  .compose input { flex: 1; font: inherit; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line);
-                   background: var(--bg); color: var(--ink); }
-
-  /* board */
-  .right { display: grid; gap: 20px; align-content: start; min-width: 0; }
-  .tabs { display: flex; gap: 4px; margin-left: 8px; }
+  .empty { color: var(--muted); font-size: 13px; text-align: center; margin: auto; max-width: 300px; }
+  .quick { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; max-height: 120px; overflow-y: auto; }
+  .quick button { font-size: 12px; padding: 4px 10px; border-radius: 99px; text-align: left; }
+  .quick button small { color: var(--muted); font-family: var(--mono); margin-right: 4px; }
+  .compose { display: flex; gap: 8px; padding: 11px 16px; border-top: 1px solid var(--line); }
+  .compose input { flex: 1; font: inherit; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  .right { display: grid; gap: 18px; align-content: start; min-width: 0; }
+  .tabs { display: flex; gap: 4px; }
   .tabs button { padding: 3px 10px; font-size: 12px; }
   .tabs button.on { background: var(--ink); color: var(--panel); border-color: var(--ink); }
-  .board-wrap { overflow-x: auto; padding: 12px 16px 16px; }
+  .board-wrap { overflow-x: auto; padding: 10px 14px 12px; }
   table.board { border-collapse: separate; border-spacing: 3px; min-width: 760px; width: 100%; }
   .board th { font: 11px var(--mono); color: var(--muted); font-weight: 400; text-align: center; padding: 2px; }
-  .board th.dock { text-align: left; font: 12px/1.3 inherit; color: var(--ink); white-space: nowrap; padding-right: 8px; min-width: 150px; }
+  .board th.dock { text-align: left; font: 12px/1.3 inherit; color: var(--ink); white-space: nowrap; padding-right: 8px; min-width: 120px; }
   .board th.dock small { display: block; color: var(--muted); font-size: 11px; }
-  .board td { height: 38px; border-radius: 5px; font: 10px/1.15 var(--mono); text-align: center; padding: 2px;
-              background: var(--free); color: var(--free-ink); cursor: default; position: relative; }
+  .board td { height: 38px; border-radius: 5px; font: 10px/1.15 var(--mono); text-align: center; padding: 2px; background: var(--free); color: var(--free-ink); }
   .board td.booked { background: var(--booked); color: var(--booked-ink); }
+  .board td.pending { background: var(--pending); color: var(--pending-ink); }
+  .board td.inprog { background: var(--inprog); color: var(--inprog-ink); }
   .board td.held { background: var(--held); color: var(--held-ink); }
   .board td.blocked { background: var(--blocked); color: var(--blocked-ink); }
   .board td.past { background: var(--past); color: var(--past-ink); }
-  .board td.inactive { background: repeating-linear-gradient(45deg, var(--past), var(--past) 4px, transparent 4px, transparent 8px); color: var(--past-ink); }
+  .board td.none { background: transparent; }
   .board td.mine { outline: 2px solid var(--mine); outline-offset: -2px; }
   .board td.now-col { box-shadow: inset 0 0 0 1px var(--accent); }
-  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); padding: 0 16px 14px; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); padding: 0 16px 8px; }
   .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; }
-
-  /* schedule */
-  .sched { padding: 12px 16px 16px; }
-  .sched table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .sched th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
-  .sched td { padding: 7px 8px; border-bottom: 1px solid var(--line); }
-  .pill { font: 11px var(--mono); padding: 2px 7px; border-radius: 4px; }
+  .yard { font-size: 12px; color: var(--muted); padding: 0 16px 12px; }
+  .yard b { color: var(--ink); font-weight: 500; }
+  .tbl { padding: 10px 16px 14px; overflow-x: auto; }
+  .tbl table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .tbl th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  .tbl td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .pill { font: 11px var(--mono); padding: 2px 7px; border-radius: 4px; white-space: nowrap; }
   .pill.keep { background: var(--free); color: var(--free-ink); }
   .pill.change { background: var(--held); color: var(--held-ink); }
-  .pill.fixed { background: var(--booked); color: var(--booked-ink); }
+  .pill.fixed { background: var(--inprog); color: var(--inprog-ink); }
   .pill.skip { background: var(--blocked); color: var(--blocked-ink); }
-  .totals { display: flex; gap: 20px; margin-top: 12px; font-size: 13px; color: var(--muted); }
+  .totals { display: flex; gap: 18px; margin-top: 10px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
   .totals b { color: var(--ink); font-weight: 600; }
-  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--ink); color: var(--panel); padding: 10px 14px;
-           border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  details { border-bottom: 1px solid var(--line); padding: 7px 0; }
+  details summary { cursor: pointer; font-size: 13px; }
+  details .why { color: var(--muted); font-size: 12px; margin: 4px 0; }
+  details pre { font: 11px/1.4 var(--mono); background: var(--bg); padding: 8px; border-radius: 6px; overflow-x: auto; margin: 4px 0 0; }
+  .count { font: 11px var(--mono); padding: 1px 6px; border-radius: 4px; margin-right: 6px; }
+  .count.bad { background: var(--blocked); color: var(--blocked-ink); }
+  .count.ok { background: var(--free); color: var(--free-ink); }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--ink); color: var(--panel); padding: 10px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
   .toast.show { opacity: 1; }
   a { color: var(--accent); }
+  @media (max-width: 960px) {
+    main { grid-template-columns: 1fr; padding: 12px; }
+    main .chat { position: static; height: 640px; min-height: 0; }
+    body header { position: static; }
+  }
 </style>
 </head>
 <body>
 <header>
   <h1>Setu<span>Haul</span> · Driver delay desk</h1>
-  <span class="sub">Snapshot 4 Aug 2026 · stand-in data</span>
+  <span class="sub">FDE Academy snapshot · 4 Aug 2026 · Asia/Kolkata</span>
   <div class="spacer"></div>
-  <label class="clock" title="Simulated clock used for every request">Clock
-    <input id="clock" value="08:30" aria-label="Simulated time (HH:MM)">
-    <button id="minus" title="Back 5 minutes">−5m</button>
-    <button id="plus" title="Forward 5 minutes">+5m</button>
+  <label class="ctl" title="Simulated clock for every request">Clock
+    <input id="clock" value="09:30" aria-label="Simulated time (HH:MM)">
+    <button id="minus">−5m</button><button id="plus">+5m</button>
   </label>
-  <label class="clock" title="Workflow: fixed steps in code. Agent: the LLM chooses which tool to call (guarded).">Mode
-    <select id="mode" style="font:13px inherit;padding:5px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)">
-      <option value="workflow">Workflow</option>
-      <option value="agent">Agent (tool calling)</option>
-    </select>
+  <label class="ctl" title="Workflow: fixed steps in code. Agent: the LLM chooses which tool to call (guarded).">Mode
+    <select id="mode"><option value="workflow">Workflow</option><option value="agent">Agent (tool calling)</option></select>
   </label>
-  <button id="reset" title="Rebuild the snapshot">Reset data</button>
+  <button id="reset" title="Restore the supplied snapshot">Reset data</button>
   <a href="/docs" target="_blank" style="font-size:13px">API docs</a>
 </header>
 
@@ -140,7 +134,7 @@
       <select id="driver" aria-label="Choose a driver"></select>
       <div class="facts" id="facts"></div>
     </div>
-    <div class="msgs" id="msgs"><p class="empty">Pick a driver and send a message, e.g. "Stuck near Kotputli, 2 hrs late".</p></div>
+    <div class="msgs" id="msgs"></div>
     <div class="quick" id="quick"></div>
     <form class="compose" id="compose">
       <input id="text" autocomplete="off" placeholder="Type as the driver…" aria-label="Driver message">
@@ -151,27 +145,33 @@
   <div class="right">
     <section class="panel">
       <h2>Dock board
-        <span class="tabs" id="tabs">
-          <button data-fac="JAI-DC" class="on">Jaipur</button>
-          <button data-fac="AMD-WH">Ahmedabad</button>
-        </span>
-        <span class="hint" id="boardHint">hover a cell for details</span>
+        <span class="tabs" id="tabs"><button data-fac="FAC-JAI-01" class="on">Jaipur DC</button><button data-fac="FAC-GGN-01">Gurugram</button></span>
+        <span class="hint">hover a cell for details</span>
       </h2>
       <div class="board-wrap"><table class="board" id="board"></table></div>
       <div class="legend">
         <span><i style="background:var(--free)"></i>Free</span>
-        <span><i style="background:var(--booked)"></i>Booked</span>
-        <span><i style="background:var(--held)"></i>Held (2 min)</span>
-        <span><i style="background:var(--blocked)"></i>Blocked</span>
+        <span><i style="background:var(--booked)"></i>Confirmed</span>
+        <span><i style="background:var(--pending)"></i>Pending warehouse</span>
+        <span><i style="background:var(--inprog)"></i>Unloading</span>
+        <span><i style="background:var(--held)"></i>Held 2 min</span>
+        <span><i style="background:var(--blocked)"></i>Blocked / breakdown / extension</span>
         <span><i style="background:var(--past)"></i>Past</span>
-        <span><i style="outline:2px solid var(--mine);outline-offset:-2px;background:transparent"></i>Selected driver</span>
+        <span><i style="outline:2px solid var(--mine);outline-offset:-2px"></i>Selected driver</span>
       </div>
+      <div class="yard" id="yard"></div>
     </section>
 
     <section class="panel">
-      <h2>Scheduling tool <span class="hint">one facility, all trucks · greedy dispatch</span>
-        <button id="runSched" class="primary" style="margin-left:8px">Propose schedule</button></h2>
-      <div class="sched" id="sched"><p class="empty" style="margin:8px 0">Proposes a sequence for the selected facility at the current clock. Try Ahmedabad at 13:55: a truck already unloading, one 90 min early at the gate, one late.</p></div>
+      <h2>Scheduling tool <span class="hint">all trucks at this facility · greedy dispatch · proposal only</span>
+        <button id="runSched" class="primary">Propose schedule</button></h2>
+      <div class="tbl" id="sched"><p class="empty" style="margin:6px 0">Uses the clock above. Try 10:15 at Jaipur: SHP1002 unloading, three trucks in the yard (early, late, broken dock), CRITICAL trucks arriving.</p></div>
+    </section>
+
+    <section class="panel">
+      <h2>Data issues <span class="hint">queries against the supplied snapshot</span>
+        <button id="runIssues">Run checks</button></h2>
+      <div class="tbl" id="issues"><p class="empty" style="margin:6px 0">23 checks from <code>analysis/data_issues.sql</code>, each with its evidence rows.</p></div>
     </section>
   </div>
 </main>
@@ -180,155 +180,154 @@
 <script>
 const DAY = "2026-08-04";
 const $ = (id) => document.getElementById(id);
-let drivers = [], facility = "JAI-DC", convo = {};
-
-const now = () => `${DAY} ${$("clock").value.trim()}`;
+let drivers = [], facility = "FAC-JAI-01", convo = {};
+const iso = (t) => `${DAY}T${t}:00+05:30`;
+const now = () => iso($("clock").value.trim());
+const hm = (ts) => ts ? ts.slice(11, 16) : "";
 const toast = (t) => { const el = $("toast"); el.textContent = t; el.classList.add("show"); setTimeout(() => el.classList.remove("show"), 2200); };
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
+// The guide's seeded driver messages (chat_messages), plus a few follow-ups. [time, text]
+const SAMPLES = {
+  DRV006: [["09:34", "Traffic after Shahpura. Reaching around 11:20. Any slot after 12?"]],
+  DRV012: [["09:29", "Tyre repaired. I can reach 11:10. I need to leave the warehouse before 1:30 for another pickup."]],
+  DRV013: [["09:19", "I am late by one hour."]],
+  DRV014: [["09:44", "Origin released me late. ETA 11:25. This load is urgent. Can I get the first possible dock?"]],
+  DRV015: [["16:24", "Evening traffic. ETA 6:30. Can the reefer unload tonight?"]],
+  DRV007: [["09:39", "Heavy trailer ETA 12:00. Original heavy-bay slot will be missed. What is next?"], ["09:40", "MH04HV4107"]],
+  DRV003: [["08:22", "I am already at the gate. Can I get a dock now instead of waiting for 9?"]],
+  DRV004: [["09:27", "I reached late and am in the yard. Has a new dock been assigned?"], ["09:31", "I will be late by 45 minutes."], ["09:32", "020"]],
+  DRV001: [["10:02", "What slots are possible after 1 PM if I reach around 12:45?"]],
+  DRV008: [["10:12", "Is my 4 PM slot still active?"]],
+  DRV005: [["09:20", "Dock D3 is not working. What should I do?"]],
+  DRV010: [["10:00", "Running 30 min late"]],
+  DRV009: [["10:10", "1 hour late, need to finish by 2 pm"]],
+  DRV011: [["09:50", "Heavy load, 20 min late"]],
+  DRV002: [["09:00", "How long more for unloading?"]],
+};
+const NOTES = { DRV006: "traffic; also has a Gurugram job", DRV012: "tyre, must leave by 1:30", DRV013: "vague 'one hour'",
+  DRV014: "CRITICAL 21 t, 75 min", DRV015: "reefer vs D5 maintenance", DRV007: "two moving trucks", DRV003: "early at gate",
+  DRV004: "late in yard + 2nd job", DRV001: "ask-only, range ETA", DRV008: "shipment cancelled", DRV005: "dock broke down",
+  DRV010: "reefer", DRV009: "CRITICAL 20 t", DRV011: "heavy 30 t", DRV002: "unloading now" };
+
 function shiftClock(min) {
   const [h, m] = $("clock").value.split(":").map(Number);
-  let t = Math.max(0, Math.min(23 * 60 + 59, h * 60 + m + min));
+  const t = Math.max(0, Math.min(23 * 60 + 59, h * 60 + m + min));
   $("clock").value = `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
   refreshBoard();
 }
-
-async function api(path, opts) {
-  const r = await fetch(path, opts);
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-  return r.json();
-}
-
-function selected() { return drivers.find(d => d.id === $("driver").value); }
-
-const NOTES = {
-  "SH-01": "clean booking 10:00", "SH-03": "reefer load", "SH-04": "heavy load (32 t)",
-  "SH-07": "booked on overlapping slot", "SH-08": "booked in maintenance window", "SH-09": "reefer on dry dock",
-  "SH-10": "booked at wrong facility", "SH-12": "ETA after slot ended", "SH-13": "90 min unload",
-  "SH-14": "booked on inactive dock", "SH-15": "already at gate", "SH-16": "no ETA",
-  "SH-18": "shares phone with SH-19", "SH-19": "shares phone · late truck", "SH-02": "ops override ETA",
-  "SH-20": "unloading now", "SH-21": "early at gate",
-};
+async function api(path, opts) { const r = await fetch(path, opts); if (!r.ok) throw new Error(`${r.status} ${await r.text()}`); return r.json(); }
+const selected = () => drivers.find(d => d.driver_id === $("driver").value);
 
 async function loadDrivers() {
   drivers = await api("/drivers");
-  const open = drivers.filter(d => ["in_transit", "arrived"].includes(d.status));
-  $("driver").innerHTML = open.map(d =>
-    `<option value="${d.id}">${d.id} · ${esc(d.driver)} · ${d.reg_no} · ${d.facility_id === "JAI-DC" ? "Jaipur" : "Ahmedabad"}${NOTES[d.id] ? " — " + NOTES[d.id] : ""}</option>`).join("");
+  $("driver").innerHTML = drivers.map(d => `<option value="${d.driver_id}">${d.driver_id} · ${esc(d.name)} — ${d.shipments.map(s => `${s.shipment_id} ${s.current_status.toLowerCase()}`).join(", ")}${NOTES[d.driver_id] ? " · " + NOTES[d.driver_id] : ""}</option>`).join("");
+  $("driver").value = "DRV012";
   onDriverChange();
 }
-
 function onDriverChange() {
   const d = selected(); if (!d) return;
-  const tags = [
-    `<span class="tag">${d.phone}</span>`,
-    `<span class="tag">${(d.load_weight_kg / 1000).toFixed(0)} t</span>`,
-    d.needs_reefer ? `<span class="tag warn">reefer</span>` : "",
-    d.load_weight_kg > 20000 ? `<span class="tag warn">heavy</span>` : "",
-    d.unload_minutes > 60 ? `<span class="tag warn">${d.unload_minutes} min unload</span>` : "",
-    NOTES[d.id] ? `<span class="tag">${NOTES[d.id]}</span>` : "",
-  ];
-  $("facts").innerHTML = tags.join("");
-  if (!convo[d.id]) convo[d.id] = { id: `ui-${d.id}-${Date.now().toString(36)}`, log: [] };
+  const open = d.shipments.filter(s => !["COMPLETED", "CANCELLED"].includes(s.current_status));
+  $("facts").innerHTML = [`<span class="tag">${d.phone}</span>`, ...d.shipments.map(s =>
+    `<span class="tag ${["COMPLETED", "CANCELLED"].includes(s.current_status) ? "" : "warn"}">${s.order_reference} · ${s.required_dock_type.toLowerCase()} · ${(s.load_weight_kg / 1000).toFixed(1)} t · ${s.expected_unload_min} min · ${s.priority_code.toLowerCase()}</span>`)].join("");
+  if (!convo[d.driver_id]) convo[d.driver_id] = { id: `ui-${d.driver_id}-${Date.now().toString(36)}`, log: [] };
+  const first = (SAMPLES[d.driver_id] || [])[0];
+  if (first && !convo[d.driver_id].log.length) $("clock").value = first[0];
   renderMsgs(); renderQuick();
-  setFacility(d.facility_id);
+  if (open[0]) setFacility(open[0].destination_facility_id); else refreshBoard();
 }
-
 function renderMsgs() {
-  const c = convo[selected().id];
-  if (!c.log.length) { $("msgs").innerHTML = `<p class="empty">No messages yet. Say how late you are, e.g. "2 hrs late, anything after 1pm".</p>`; return; }
+  const c = convo[selected().driver_id];
+  if (!c.log.length) { $("msgs").innerHTML = `<p class="empty">Click one of the dataset's messages below (it sets the clock to when it was sent), or type your own.</p>`; return; }
   $("msgs").innerHTML = c.log.map(m => `<div class="msg ${m.dir}">${esc(m.text)}${m.action ? `<br><span class="act">${m.mode === "agent" ? "agent · " : ""}${m.action}${m.source ? " · " + (m.source === "llm" ? "LLM wording" : "template") : ""}</span>` : ""}${m.trace && m.trace.length ? `<span class="trace">${m.trace.map(t => `→ ${esc(t.tool)}(${esc(Object.entries(t.args).map(([k, v]) => k + "=" + v).join(", "))}) ⇒ ${esc(t.result.status || t.result.error || "")}`).join("\n")}</span>` : ""}<span class="meta">${m.at}</span></div>`).join("");
   $("msgs").scrollTop = $("msgs").scrollHeight;
 }
-
 function renderQuick() {
-  const c = convo[selected().id];
+  const d = selected(), c = convo[d.driver_id];
   const offered = c.log.length && c.log[c.log.length - 1].action === "offered";
-  const items = offered ? ["1", "2", "the second one", "3"]
-    : ["2 hrs late", "running late bhai", "1.5 hours late, anything after 1pm", "3 hours late, need to leave by 4pm", "what is my slot?"];
-  if (selected().id === "SH-19" || selected().id === "SH-18") items.push(selected().reg_no);
-  $("quick").innerHTML = items.map(t => `<button type="button">${esc(t)}</button>`).join("");
-  [...$("quick").children].forEach(b => b.onclick = () => send(b.textContent));
+  const items = offered ? [[null, "1"], [null, "2"], [null, "3"]] : (SAMPLES[d.driver_id] || []);
+  $("quick").innerHTML = items.map(([t, txt]) => `<button type="button">${t ? `<small>${t}</small>` : ""}${esc(txt)}</button>`).join("");
+  [...$("quick").children].forEach((b, i) => b.onclick = () => { if (items[i][0]) $("clock").value = items[i][0]; send(items[i][1]); });
 }
-
 async function send(text) {
   text = text.trim(); if (!text) return;
-  const d = selected(), c = convo[d.id], at = $("clock").value;
+  const d = selected(), c = convo[d.driver_id], at = $("clock").value;
   c.log.push({ dir: "in", text, at }); renderMsgs(); $("text").value = "";
   try {
     const r = await api("/message", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ conversation_id: c.id, phone: d.phone, text, now: now(), mode: $("mode").value }) });
     c.log.push({ dir: "out", text: r.reply, action: r.action, source: r.reply_source, mode: r.mode, trace: r.tool_calls, at });
-    if (r.action === "confirmed") toast(`Booked ${r.slot_id}`);
-    if (r.action === "ask_vehicle") {   // phone shared: follow whichever truck the driver names next
-      c.shared = true;
-    }
-  } catch (e) {
-    c.log.push({ dir: "out", text: "Error: " + e.message, at });
-  }
-  renderMsgs(); renderQuick(); refreshBoard();
+    if (r.action === "confirmed") toast(`Booked ${r.slot_id}${r.extension_slot_id ? " + " + r.extension_slot_id : ""}`);
+  } catch (e) { c.log.push({ dir: "out", text: "Error: " + e.message, at }); }
+  renderMsgs(); renderQuick();
+  if (["offered", "confirmed"].includes(c.log[c.log.length - 1].action)) shiftClock(1); else refreshBoard();
 }
-
 function setFacility(fac) {
-  facility = fac;
-  [...$("tabs").children].forEach(b => b.classList.toggle("on", b.dataset.fac === fac));
-  refreshBoard();
+  facility = fac; [...$("tabs").children].forEach(b => b.classList.toggle("on", b.dataset.fac === fac)); refreshBoard();
 }
-
 async function refreshBoard() {
   const data = await api(`/board/${facility}?now=${encodeURIComponent(now())}`);
-  const hours = Array.from({ length: 16 }, (_, i) => i + 6);
-  const nowT = now(), sel = selected()?.id;
+  const hours = Array.from({ length: 14 }, (_, i) => i + 8);
+  const nowT = now(), mine = new Set((selected()?.shipments || []).map(s => s.shipment_id));
   const nowHour = Number($("clock").value.split(":")[0]);
   let html = `<tr><th></th>${hours.map(h => `<th>${String(h).padStart(2, "0")}</th>`).join("")}</tr>`;
   for (const d of data.docks) {
-    const mine = data.slots.filter(s => s.dock_id === d.id);
-    const caps = [d.supports_reefer ? "reefer" : "dry", `${d.max_weight_kg / 1000} t`, d.active ? "" : "inactive"].filter(Boolean).join(" · ");
-    html += `<tr><th class="dock">${esc(d.name)}<small>${caps}</small></th>`;
+    const ss = data.slots.filter(s => s.dock_id === d.dock_id);
+    html += `<tr><th class="dock">${d.dock_code} · ${d.dock_type.toLowerCase()}<small>${d.max_vehicle_weight_kg / 1000} t${d.supports_refrigerated ? " · reefer" : ""}</small></th>`;
     for (const h of hours) {
-      const start = `${DAY} ${String(h).padStart(2, "0")}:00`, end = `${DAY} ${String(h + 1).padStart(2, "0")}:00`;
-      const over = mine.filter(s => s.start_at < end && s.end_at > start);
-      const booked = over.find(s => s.booked_by), held = over.find(s => s.held_by), blocked = over.find(s => s.blocked);
-      let cls = "", label = "", tip = `${d.id} ${start.slice(11)}–${end.slice(11)}`;
-      if (!d.active) { cls = "inactive"; label = booked ? booked.booked_by : ""; tip += " · dock inactive"; }
-      else if (booked) { cls = "booked"; label = booked.booked_by; tip += ` · booked by ${booked.booked_by}${booked.start_at.slice(14) !== "00" ? ` (${booked.start_at.slice(11)}–${booked.end_at.slice(11)})` : ""}`; }
-      else if (held) { cls = "held"; label = held.held_by; tip += ` · held for ${held.held_by}`; }
-      else if (blocked) { cls = "blocked"; label = blocked.blocked; tip += ` · ${blocked.blocked}`; }
-      else if (end <= nowT) { cls = "past"; tip += " · past"; }
-      else tip += " · free";
-      if (booked?.booked_by === sel || held?.held_by === sel) cls += " mine";
+      const start = iso(String(h).padStart(2, "0") + ":00"), end = iso(String(h + 1).padStart(2, "0") + ":00");
+      const over = ss.filter(s => s.slot_start_ts < end && s.slot_end_ts > start);
+      let cls = "", label = "", tip = `${d.dock_code} ${hm(start)}–${hm(end)}`;
+      if (!over.length) cls = "none";
+      else {
+        const s = over.find(x => x.booking) || over.find(x => x.held_by) || over.find(x => x.event || x.slot_status !== "OPEN") || over[0];
+        tip += ` · ${s.slot_id} ${hm(s.slot_start_ts)}–${hm(s.slot_end_ts)}`;
+        if (s.booking) {
+          const [sid, st] = s.booking.split(":");
+          label = sid.replace("SHP", ""); cls = st === "IN_PROGRESS" ? "inprog" : st === "PENDING_CONFIRMATION" ? "pending" : "booked";
+          tip += ` · ${sid} ${st}`; if (mine.has(sid)) cls += " mine";
+          if (s.event) { label += " ⚠"; tip += ` · ${s.event}`; }
+        } else if (s.held_by) { cls = "held"; label = s.held_by.replace("SHP", ""); tip += ` · held for ${s.held_by}`; if (mine.has(s.held_by)) cls += " mine"; }
+        else if (s.event || s.slot_status !== "OPEN") { cls = "blocked"; label = (s.block_reason || "").startsWith("Unload extension") ? "ext" : "×"; tip += ` · ${s.block_reason || s.event}`; }
+        else if (s.slot_end_ts <= nowT) { cls = "past"; tip += " · past"; }
+        else tip += " · free";
+      }
       if (h === nowHour) cls += " now-col";
-      if (blocked && booked) { label += " ⚠"; tip += ` · conflicts with ${blocked.blocked}`; }
-      if (over.filter(s => s.booked_by).length > 1) { label = over.filter(s => s.booked_by).map(s => s.booked_by).join(" "); tip += " · DOUBLE BOOKED"; cls += " blocked"; }
       html += `<td class="${cls}" title="${esc(tip)}">${esc(label)}</td>`;
     }
     html += "</tr>";
   }
   $("board").innerHTML = html;
+  const parts = [...data.in_dock.map(x => `<b>${x.shipment_id}</b> unloading at ${x.actual_dock_id.slice(-2)} since ${hm(x.unload_start_ts)} (${x.expected_unload_min} min)`),
+                 ...data.yard.map(y => `<b>${y.shipment_id}</b> ${y.queue_state.replace("WAITING_", "").toLowerCase().replace("_", " ")} in yard since ${hm(y.gate_in_ts)}`)];
+  $("yard").innerHTML = parts.join(" · ");
 }
-
 async function runSchedule() {
   const r = await api(`/schedule/${facility}?now=${encodeURIComponent(now())}`);
   const rows = [
-    ...r.fixed.map(f => `<tr><td><span class="pill fixed">FIXED</span></td><td>${f.shipment}</td><td>${f.dock}</td><td>${f.start.slice(11)}–${f.end.slice(11)}</td><td colspan="2">unloading now</td><td></td></tr>`),
-    ...r.plan.map(p => `<tr><td><span class="pill ${p.changed ? "change" : "keep"}">${p.changed ? "CHANGE" : "KEEP"}</span></td><td>${p.shipment}</td><td>${p.dock}</td><td>${p.start.slice(11)}–${p.end.slice(11)}</td><td>${p.wait_min}m wait</td><td>${p.late_min}m late</td><td style="color:var(--muted)">was ${p.promised ? p.promised.slice(11) : "no booking"} · ${p.arrival_basis}</td></tr>`),
-    ...r.skipped.map(s => `<tr><td><span class="pill skip">SKIP</span></td><td>${s.shipment}</td><td colspan="5" style="color:var(--muted)">${s.reason}</td></tr>`),
-  ];
-  $("sched").innerHTML = `<table><tr><th></th><th>Shipment</th><th>Dock</th><th>Window</th><th>Wait</th><th>Late</th><th>Previously</th></tr>${rows.join("")}</table>
-    <div class="totals"><span>Total wait <b>${r.totals.wait_min} min</b></span><span>Late <b>${r.totals.late_min} min</b></span><span>Changes <b>${r.totals.changes}</b></span><span>Proposal only · nothing is booked</span></div>`;
+    ...r.fixed.map(f => `<tr><td><span class="pill fixed">FIXED</span></td><td>${f.shipment}</td><td>${f.priority.toLowerCase()}</td><td>${f.dock}</td><td>${hm(f.start)}–${hm(f.end)}</td><td colspan="2">unloading now</td></tr>`),
+    ...r.plan.map(p => `<tr><td><span class="pill ${p.changed ? "change" : "keep"}">${p.changed ? "CHANGE" : "KEEP"}</span></td><td>${p.shipment}</td><td>${p.priority.toLowerCase()}</td><td>${p.dock}${p.extension_slot_id ? " +ext" : ""}</td><td>${hm(p.start)}–${hm(p.end)}</td><td>${p.wait_min}m wait · ${p.late_min}m late</td><td style="color:var(--muted)">was ${p.promised || "no booking"} · ${esc(p.arrival_basis)}</td></tr>`),
+    ...r.skipped.map(s => `<tr><td><span class="pill skip">SKIP</span></td><td>${s.shipment}</td><td colspan="5" style="color:var(--muted)">${esc(s.reason)}</td></tr>`)];
+  $("sched").innerHTML = `<table><tr><th></th><th>Shipment</th><th>Priority</th><th>Dock</th><th>Window</th><th>Cost</th><th>Previously</th></tr>${rows.join("")}</table>
+    <div class="totals"><span>Wait <b>${r.totals.wait_min} min</b></span><span>Late <b>${r.totals.late_min} min</b></span><span>Changes <b>${r.totals.changes}</b></span><span>Unplaced <b>${r.totals.unplaced}</b></span><span>Proposal only · nothing booked</span></div>`;
+}
+async function runIssues() {
+  const r = await api("/data-issues");
+  const bad = r.filter(x => x.rows).length;
+  $("issues").innerHTML = `<p style="margin:4px 0 8px;font-size:13px"><b>${bad}</b> of ${r.length} checks found problems.</p>` + r.map(x =>
+    `<details><summary><span class="count ${x.rows ? "bad" : "ok"}">${x.rows}</span>${x.n}. ${esc(x.title)}</summary><div class="why">${esc(x.why)}</div>${x.rows ? `<pre>${esc(x.columns.join(" | "))}\n${x.evidence.map(e => e.map(v => v ?? "").join(" | ")).map(esc).join("\n")}</pre>` : ""}</details>`).join("");
 }
 
 $("driver").onchange = onDriverChange;
-$("mode").onchange = () => { convo = {}; onDriverChange(); toast($("mode").value === "agent" ? "Agent mode: the LLM picks the tools" : "Workflow mode: fixed steps in code"); };
-api("/health").then(h => { if (!h.agent_mode_available) { $("mode").querySelector('[value=agent]').disabled = true; $("mode").title = "Agent mode needs OPENROUTER_API_KEY"; } }).catch(() => {});
 $("compose").onsubmit = (e) => { e.preventDefault(); send($("text").value); };
-$("plus").onclick = () => shiftClock(5);
-$("minus").onclick = () => shiftClock(-5);
+$("plus").onclick = () => shiftClock(5); $("minus").onclick = () => shiftClock(-5);
 $("clock").onchange = refreshBoard;
 $("tabs").onclick = (e) => { if (e.target.dataset.fac) setFacility(e.target.dataset.fac); };
-$("runSched").onclick = runSchedule;
-$("reset").onclick = async () => { await api("/reset", { method: "POST" }); convo = {}; toast("Data reset to snapshot"); await loadDrivers(); };
-loadDrivers().catch(e => { $("msgs").innerHTML = `<p class="empty">Could not reach the API: ${esc(e.message)}. On the free plan the first request can take ~50 s while the server wakes up — reload in a moment.</p>`; });
+$("runSched").onclick = runSchedule; $("runIssues").onclick = runIssues;
+$("mode").onchange = () => { convo = {}; onDriverChange(); toast($("mode").value === "agent" ? "Agent mode: the LLM picks the tools" : "Workflow mode: fixed steps in code"); };
+$("reset").onclick = async () => { await api("/reset", { method: "POST" }); convo = {}; toast("Snapshot restored"); await loadDrivers(); };
+api("/health").then(h => { if (!h.agent_mode_available) $("mode").querySelector("[value=agent]").disabled = true; }).catch(() => {});
+loadDrivers().catch(e => { $("msgs").innerHTML = `<p class="empty">Could not reach the API: ${esc(e.message)}. On the free plan the first request can take ~50 s while the server wakes up.</p>`; });
 </script>
 </body>
 </html>

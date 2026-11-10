@@ -2,63 +2,66 @@
 
 ```mermaid
 flowchart TD
-    D[Driver chat message] --> API[Conversation service<br/>FastAPI · app/api.py + app/service.py]
-    API --> AG[LLM agent<br/>app/agent.py<br/>text → Extraction]
-    AG --> API
-    API --> T1[find_options]
-    API --> T2[hold_slot]
-    API --> T3[confirm]
-    OPS[Ops / agent] --> T4[propose_schedule<br/>app/scheduler.py]
-    T1 & T2 & T3 & T4 --> DB[(SQLite<br/>18 tables · partial unique indexes)]
-    T3 -->|after COMMIT only| MSG[Confirmation sent + logged]
+    D[Driver WhatsApp message] --> API[FastAPI · app/api.py]
+    API --> W[Workflow · service.py<br/>fixed steps]
+    API -.mode=agent.-> A[Agent · agent_mode.py<br/>LLM picks tools]
+    W --> X[Message reader · agent.py<br/>OpenRouter or regex]
+    W --> K[Desk · desk.py]
+    A --> K
+    K --> T[tools.py<br/>find_options · hold_option · confirm]
+    T --> DB[(FDE snapshot copy<br/>18 supplied tables + slot_holds + agent_thread_state)]
+    K --> DB
+    K --> PH[phrasing.py<br/>LLM wording, facts checked]
+    OPS[Operator] --> S[scheduler.py<br/>facility proposal]
+    S --> DB
 ```
 
-The agent only reads text. The tools only read structured data. Only the
-tools write capacity, and only inside transactions.
+The LLM only reads text, words replies, and (in agent mode) chooses tools. Every capacity
+change goes through `tools.py`, inside `BEGIN IMMEDIATE`, with the supplied
+`ux_active_appointment_per_slot` index as the final guard.
 
-## One message, end to end
+## One message, end to end (workflow)
 
-1. Log the inbound message (`messages`).
-2. Work out the shipment from the phone. If several match, ask for the truck number.
-3. Extract fields from the text (LLM or regex) → validated `Extraction`.
-4. If the gate shows the truck inside → "already arrived", stop.
-5. Compute the new ETA (ops override > newest source) and record it (`eta_updates`).
-6. `find_options` → `hold_slot` up to 3 → reply with options (state `offered`).
-7. Driver picks one → `confirm` (one transaction) → after commit, send and log
-   the confirmation, release the other holds.
-8. Any failure → honest reply + fresh search or escalate. Never a false promise.
+1. **Driver:** phone → `drivers`. Unknown number → stop.
+2. **Thread:** `chat_threads` row (`CHAT-<conversation>`); state in `agent_thread_state`.
+3. **Duplicate?** Same external id, or same text within 3 min → log with `is_duplicate = 1`, stop.
+4. **Read:** extractor → intent, ETA or delay, window, choice, confidence, reason, reference.
+   Log to `chat_messages`.
+5. **Shipment:** one open / named / only trip underway → else ask with order numbers (park the message).
+6. **Cancelled** → tell the driver. **In dock** → status. **In the yard** → keep the slot if
+   valid, else re-slot from now.
+7. **Delay:** ETA = stated time, or current ETA (as of now) + delay → `eta_updates`,
+   `shipments.latest_eta_ts`, `driver_exceptions`.
+8. **Offer:** `find_options` → `hold_option` × up to 3 (main + extension) → reply. Nothing fits
+   → escalate (`operational_messages` to a real contact).
+9. **Confirm:** `confirm` (holds valid → old booking `CANCELLED` → new `CONFIRMED` → extension
+   `BLOCKED`) → after commit, WhatsApp confirmation + warehouse notice.
+10. **Reply:** LLM wording if configured and `phrasing.check` passes, else template → `chat_messages`.
 
-## Conversation states
+## What `find_options` checks
 
-```mermaid
-stateDiagram-v2
-    [*] --> new
-    new --> new: ask_eta / ask_vehicle / already_arrived / escalate
-    new --> offered: options held
-    offered --> confirmed: confirm OK
-    offered --> new: hold expired / slot taken
-    offered --> offered: new ETA (old holds released)
-```
-
-## Tables (18, three groups)
-
-| Group | Tables |
+| Rule | Source |
 |---|---|
-| Master data | facilities, docks, carriers, drivers, vehicles, customers |
-| Plan and operations | shipments, slots, dock_blocks, appointments, appointment_history, eta_updates, gate_events, dock_events |
-| Conversations and messaging | conversations, messages, outbound_confirmations, slot_holds |
+| Destination facility, active dock | `shipments`, `docks.dock_status` |
+| Reefer → D5 (refrigerated reefer dock) | `required_dock_type`, `temperature_control_required`, RULE003 |
+| > 25 t or HEAVY → D6 | `load_weight_kg`, RULE004 |
+| Load ≤ dock max weight | `docks.max_vehicle_weight_kg` |
+| Slot `OPEN`, no overlapping active booking on the dock | `appointment_slots`, `appointments` |
+| No breakdown / maintenance / manual block | `dock_status_events` |
+| No live hold by another driver | `slot_holds` |
+| Start ≥ now, ≤ last new start; end ≤ close | `facility_rules` RULE005, `facilities` |
+| Unload fits, or next slot free as extension | `expected_unload_min` |
+| Finish ≤ driver's limit | message |
 
-Integrity rules in the database:
-- `ux_appt_slot_active`: one active appointment per slot (supplied by the brief)
-- `ux_appt_shipment_active`: one active appointment per shipment (supplied by the brief)
-- `ux_hold_slot_active`: one active hold per slot (added)
+## Tables written
 
-## Concurrency, in one picture
-
-```
-Driver A chat ─┐                    ┌─ hold_slot(S) → INSERT hold … OK
-               ├─ both see S free ──┤
-Driver B chat ─┘                    └─ hold_slot(S) → unique index → slot_held → B gets other options
-```
-Even with holds bypassed (`book_direct`), the appointment unique index lets
-exactly one insert through. Tested with 10 threads released by a barrier.
+| Table | When |
+|---|---|
+| `chat_threads`, `chat_messages` | every message, both directions |
+| `eta_updates`, `shipments.latest_eta_ts` | delay reported |
+| `driver_exceptions` | delay / ambiguity / escalation (one row per thread) |
+| `slot_holds` (added) | options offered |
+| `appointments` | confirm: old row cancelled, new row with `replaced_appointment_id` |
+| `appointment_slots` | extension slot blocked / released |
+| `operational_messages` | WhatsApp confirmation, warehouse notice, escalation |
+| `agent_thread_state` (added) | offered options, parked message |

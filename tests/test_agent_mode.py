@@ -3,8 +3,7 @@ import json
 
 from app import tools
 from app.agent_mode import MAX_STEPS, AgentService
-
-T = lambda hhmm: f"2026-08-04 {hhmm}"  # noqa: E731
+from conftest import P, T
 
 
 def call(name, **args):
@@ -12,7 +11,7 @@ def call(name, **args):
 
 
 class Script:
-    """Plays back assistant messages; records what the agent sent."""
+    """Plays back assistant turns; records what the agent sent."""
     def __init__(self, *turns):
         self.turns, self.seen = list(turns), []
 
@@ -23,74 +22,86 @@ class Script:
             return {"role": "assistant", "content": t, "tool_calls": None}
         return {"role": "assistant", "content": None, "tool_calls": t}
 
-    def last_tool_result(self):
-        return json.loads(self.seen[-1][-1]["content"])
+
+def agent(conn, *turns):
+    s = Script(*turns)
+    return AgentService(conn, llm=s), s
 
 
 def test_full_flow_offer_then_confirm(conn):
-    s = Script([call("report_delay", delay_minutes=120)], [call("offer_slots")],
-               "Theek hai, naya ETA 12:00 PM. Slots:\n1. 12:00 PM - Jaipur Dock 1\n"
-               "2. 12:00 PM - Jaipur Dock 4 (heavy)\n3. 1:00 PM - Jaipur Dock 1\nNumber bhejiye.")
-    r = AgentService(conn, llm=s).handle("a1", "+919800000001", "do ghante late", T("08:30"))
-    assert r["action"] == "offered" and r["eta"] == T("12:00") and r["reply_source"] == "llm"
+    a, _ = agent(conn, [call("report_delay", new_eta="2026-08-04 11:10", confidence="HIGH", reason="BREAKDOWN")],
+                 [call("offer_slots", latest_end="2026-08-04 13:30")],
+                 "Theek hai, ETA 11:10 AM. Slots:\n1. 12:00 PM - Dock D2\n2. 12:00 PM - Dock D4\nNumber bhejiye.")
+    r = a.handle("a1", P(12), "Tyre repaired. I can reach 11:10. Leave before 1:30.", T("09:29"))
+    assert r["action"] == "offered" and r["reply_source"] == "llm"
     assert [c["tool"] for c in r["tool_calls"]] == ["report_delay", "offer_slots"]
-
-    s2 = Script([call("confirm_option", option_number=2)], "Pakka: 12:00 PM, Jaipur Dock 4 (heavy).")
-    r2 = AgentService(conn, llm=s2).handle("a1", "+919800000001", "doosra wala", T("08:31"))
-    assert r2["action"] == "confirmed" and r2["slot_id"] == "JAI-D4-12"
-    assert tools.current_appointment(conn, "SH-01")["slot_id"] == "JAI-D4-12"
-    # history from the first message was given to the model
-    assert any(m.get("content") == "do ghante late" for m in s2.seen[0])
+    b, s2 = agent(conn, [call("confirm_option", option_number=2)], "Pakka: 12:00 PM, Dock D4.")
+    r2 = b.handle("a1", P(12), "2", T("09:30"))
+    assert r2["action"] == "confirmed" and tools.current_appointment(conn, "SHP1012")["dock_code"] == "D4"
+    assert any((m.get("content") or "").startswith("Tyre repaired") for m in s2.seen[0])   # history was given
 
 
 def test_confirm_without_offer_is_refused(conn):
-    s = Script([call("confirm_option", option_number=1)], "Done!")
-    r = AgentService(conn, llm=s).handle("a2", "+919800000001", "book me anything", T("08:30"))
-    assert "error" in r["tool_calls"][0]["result"]
-    assert r["action"] != "confirmed"
-    assert tools.current_appointment(conn, "SH-01")["slot_id"] == "JAI-D1-10"   # unchanged
+    a, _ = agent(conn, [call("confirm_option", option_number=1)], "Done!")
+    r = a.handle("a2", P(13), "book me anything", T("09:30"))
+    assert "error" in r["tool_calls"][0]["result"] and r["action"] != "confirmed"
+    assert tools.current_appointment(conn, "SHP1013")["appointment_id"] == "APT1013A"
 
 
-def test_option_out_of_range_refused(conn):
-    AgentService(conn, llm=Script([call("report_delay", delay_minutes=120)], [call("offer_slots")], "x")) \
-        .handle("a3", "+919800000001", "2 hrs late", T("08:30"))
-    s = Script([call("confirm_option", option_number=7)], "ok")
-    r = AgentService(conn, llm=s).handle("a3", "+919800000001", "7", T("08:31"))
-    assert r["tool_calls"][0]["result"]["error"].startswith("Option must be")
-    assert r["action"] == "clarify"
+def test_cannot_guess_shipment_for_driver_with_two_moving_trucks(conn):
+    a, _ = agent(conn, [call("identify_shipment", reference="ORD-260804-016")], "Which order?")
+    r = a.handle("g1", P(7), "Heavy trailer late, what next?", T("09:39"))
+    assert "do not guess" in r["tool_calls"][0]["result"]["error"]
+    assert r["action"] == "ask_shipment"
 
 
-def test_gate_in_blocks_new_slot(conn):
-    s = Script([call("report_delay", delay_minutes=60)], [call("offer_slots")], "Here you go")
-    r = AgentService(conn, llm=s).handle("a4", "+919800000015", "1 hour late", T("08:30"))
-    assert r["tool_calls"][0]["result"]["status"] == "already_arrived"
-    # the model ignored the note and called offer_slots anyway: still refused
-    assert r["tool_calls"][1]["result"]["status"] == "already_arrived"
-    assert r["action"] == "already_arrived" and "7:50 AM" in r["reply"]
-    assert conn.execute("SELECT COUNT(*) FROM slot_holds WHERE conversation_id='a4'").fetchone()[0] == 0
+def test_identify_with_what_the_driver_wrote(conn):
+    a, _ = agent(conn, "Which order is it, ORD-260804-007 or ORD-260804-016?")
+    assert a.handle("g1b", P(7), "Heavy trailer late", T("09:39"))["action"] == "ask_shipment"
+    b, _ = agent(conn, [call("identify_shipment", reference="MH04HV4107")],
+                 [call("report_delay", new_eta="2026-08-04 12:00")], [call("offer_slots")], "ok")
+    r = b.handle("g1b", P(7), "MH04HV4107, ETA 12:00", T("09:40"))
+    assert r["action"] == "offered" and {o["dock_code"] for o in r["options"]} == {"D6"}
 
 
-def test_shared_phone_requires_identification(conn):
-    s = Script([call("report_delay", delay_minutes=60)], "Which truck are you on? GJ01AB1018 or GJ01AB1019?")
-    r = AgentService(conn, llm=s).handle("a5", "+919800000018", "late by 1 hour", T("11:00"))
+def test_tools_refuse_until_identified(conn):
+    a, _ = agent(conn, [call("report_delay", delay_minutes=60)], "Which order is this for?")
+    r = a.handle("g2", P(7), "1 hour late", T("09:39"))
     assert "not identified" in r["tool_calls"][0]["result"]["error"]
-    assert r["action"] == "ask_vehicle"
-    s2 = Script([call("identify_truck", truck_number="GJ01 AB 1019")],
-                [call("report_delay", delay_minutes=60)], [call("offer_slots")], "1. … (bad list)")
-    r2 = AgentService(conn, llm=s2).handle("a5", "+919800000018", "GJ01 AB 1019", T("11:01"))
-    assert r2["action"] == "offered" and r2["reply_source"] == "template"   # bad list -> template
+
+
+def test_delay_beats_model_computed_eta(conn):
+    a, _ = agent(conn, [call("report_delay", delay_minutes=60, new_eta="2026-08-04 10:19")], "noted")
+    r = a.handle("g3", P(13), "I am late by one hour.", T("09:19"))
+    assert r["eta"] == T("11:00")          # planned 10:00 + 1 h, not the model's 10:19
+
+
+def test_on_site_truck_is_planned_from_now(conn):
+    a, _ = agent(conn, [call("report_delay", delay_minutes=60)], [call("offer_slots")], "ok")
+    r = a.handle("g4", P(5), "I am 1 hour late", T("09:20"))      # SHP1005 is in the yard
+    assert r["tool_calls"][0]["result"]["status"] == "on_site"
+    assert r["action"] == "offered" and all(o["dock_code"] in ("D2", "D4") for o in r["options"])
+    assert conn.execute("SELECT COUNT(*) FROM eta_updates WHERE eta_update_id LIKE 'ETA-%'").fetchone()[0] == 0
 
 
 def test_hallucinated_time_falls_back_to_template(conn):
-    s = Script([call("report_delay", delay_minutes=120)], [call("offer_slots")],
-               "New ETA 12:00 PM.\n1. 11:00 AM - Jaipur Dock 1\n2. 12:00 PM - Jaipur Dock 4 (heavy)\n3. 1:00 PM - Jaipur Dock 1")
-    r = AgentService(conn, llm=s).handle("a6", "+919800000001", "2 hrs late", T("08:30"))
-    assert r["reply_source"] == "template" and "11:00 AM" not in r["reply"]
+    a, _ = agent(conn, [call("report_delay", new_eta="2026-08-04 11:10")], [call("offer_slots")],
+                 "New ETA 11:10 AM.\n1. 11:00 AM - Dock D1\n2. 12:00 PM - Dock D4")
+    r = a.handle("g5", P(12), "reach 11:10", T("09:29"))
+    assert r["reply_source"] == "template" and "11:00 AM - Dock D1" not in r["reply"]
+
+
+def test_option_out_of_range_refused(conn):
+    a, _ = agent(conn, [call("report_delay", new_eta="2026-08-04 11:10")], [call("offer_slots")], "x")
+    a.handle("g6", P(12), "reach 11:10", T("09:29"))
+    b, _ = agent(conn, [call("confirm_option", option_number=7)], "ok")
+    r = b.handle("g6", P(12), "7", T("09:30"))
+    assert "option number" in r["tool_calls"][0]["result"]["error"] and r["action"] == "clarify"
 
 
 def test_step_limit_escalates(conn):
-    s = Script(*[[call("get_booking_status")] for _ in range(MAX_STEPS)])
-    r = AgentService(conn, llm=s).handle("a7", "+919800000001", "loop", T("08:30"))
+    a, _ = agent(conn, *[[call("get_booking_status")] for _ in range(MAX_STEPS)])
+    r = a.handle("g7", P(13), "loop", T("09:30"))
     assert r["action"] == "escalate" and len(r["tool_calls"]) == MAX_STEPS
 
 
@@ -98,26 +109,19 @@ def test_llm_failure_still_answers(conn):
     class Down:
         def chat_tools(self, *a, **k):
             raise TimeoutError
-    r = AgentService(conn, llm=Down()).handle("a8", "+919800000001", "2 hrs late", T("08:30"))
+    r = AgentService(conn, llm=Down()).handle("g8", P(12), "2 hrs late", T("09:30"))
     assert r["action"] == "escalate" and r["reply"]
 
 
 def test_bad_arguments_do_not_crash(conn):
-    s = Script([call("report_delay", delay_minutes=99999)], [call("offer_slots", earliest="tomorrow")],
-               "How late are you exactly?")
-    r = AgentService(conn, llm=s).handle("a9", "+919800000001", "very late", T("08:30"))
-    assert all("error" in c["result"] for c in r["tool_calls"])
-    assert r["action"] == "ask_eta"
+    a, _ = agent(conn, [call("report_delay", delay_minutes=99999)], [call("offer_slots", earliest="tomorrow")],
+                 "How late are you exactly?")
+    r = a.handle("g9", P(12), "very late", T("09:30"))
+    assert all("error" in c["result"] for c in r["tool_calls"]) and r["action"] == "ask_eta"
 
 
-def test_cannot_guess_truck_on_shared_phone(conn):
-    s = Script([call("identify_truck", truck_number="GJ01AB1018")], "Which truck?")
-    r = AgentService(conn, llm=s).handle("g1", "+919800000018", "late by 1 hour", T("11:00"))
-    assert "do not guess" in r["tool_calls"][0]["result"]["error"]
-    assert r["action"] == "ask_vehicle"
-
-
-def test_delay_beats_model_computed_eta(conn):
-    s = Script([call("report_delay", delay_minutes=120, new_eta=T("10:30"))], "noted")
-    r = AgentService(conn, llm=s).handle("g2", "+919800000001", "2 hrs late", T("08:30"))
-    assert r["eta"] == T("12:00")          # planned 10:00 + 2h, not the model's 10:30
+def test_cancelled_and_unknown_skip_the_llm(conn):
+    a, s = agent(conn)
+    assert a.handle("g10", P(8), "Is my 4 PM slot still active?", T("10:12"))["action"] == "cancelled_shipment"
+    assert a.handle("g11", "+91-9999999999", "late", T("10:12"))["action"] == "no_shipment"
+    assert s.seen == []

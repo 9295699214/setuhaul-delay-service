@@ -1,269 +1,180 @@
 # Design decisions
 
-Each decision has the choice, the reason, and the evidence (a test, a query
-or a report line you can run). Numbers come from the stand-in snapshot until
-the FDE Academy database is plugged in.
+Each decision gives the choice, the reason and the evidence: a test, a query or a
+report line you can run. Everything runs against the supplied FDE Academy snapshot
+(`data/setuhaul_freight_operations.db`, 4 Aug 2026, Asia/Kolkata).
+
+## The guide's seven design questions
+
+### 1. What should the agent clarify before calling any scheduling tool?
+
+Only what the backend cannot know, in this order:
+
+1. **Which shipment?** The phone identifies the driver. With several open shipments,
+   the rule is: the one the message names (order number, its last digits, or a unique
+   truck number); else the only trip that is underway, unless the message reports a delay
+   while that truck is already on site, which is a contradiction. Otherwise ask.
+   - DRV006: SHP1006 is in transit and SHP1021 hasn't started, so SHP1006, no question.
+   - DRV004 / THR010: "late by 45 minutes" while SHP1004 is in the yard, so ask (matches MSG017).
+   - DRV007 drives two moving trucks (data issue 7), so ask.
+2. **Is the truck already here?** If `facility_checkins` has a gate-in, plan from now and
+   never from a declared ETA.
+3. **How late, and any window?** ETA, "after 12", "must leave before 1:30".
+
+Truck type, load, weight, dock compatibility and the current booking are never asked;
+they come from the database. *Evidence:* `tests/test_tools.py::test_resolution_rules`,
+ladder cases "Two assignments" and "Driver on two moving trucks".
+
+### 2. Should a displayed option reserve capacity, or only explicit confirmation?
+
+**Displayed options are held for 2 minutes** (`slot_holds`, one of only two added
+tables, with its own partial unique index). Without a hold, a driver often picks a slot
+that is gone by the time they reply. With long holds, a delay wave freezes scarce docks.
+A 75-minute unload holds its extension slot too, all or nothing. An expired hold gives an
+honest "no longer available" and a fresh search. *Evidence:* ladder case "Hold expires",
+`test_extension_slot_cannot_be_double_used`.
+
+### 3. Two drivers choosing the same slot at nearly the same time?
+
+Three layers, plus one rule:
+1. Holds: the second driver can't even be offered the slot (`ux_active_hold_per_slot`).
+2. `confirm` runs a conditional `UPDATE ... WHERE status='ACTIVE' AND expires_at > now`
+   inside `BEGIN IMMEDIATE`, so a hold is used once and only while valid.
+3. The supplied `ux_active_appointment_per_slot` rejects any second active booking.
+4. The WhatsApp confirmation is written to `operational_messages` only after `COMMIT`.
+
+*Evidence:* `eval.py` race, 30 rounds × 6 drivers (the guide's SHP1006/1012/1013/1014 plus
+SHP1009/1017) for the same few 12:00 slots: zero slots promised twice, zero false promises,
+zero double bookings including extension slots. `tests/test_concurrency.py` races 10
+holds, 10 direct bookings with no holds at all, and 10 confirms of one hold. Exactly one
+wins each time.
+
+### 4. How to balance priority, physical arrival, waiting time and commitments?
+
+In the **scheduling tool** (`app/scheduler.py`), with a transparent score per option:
+`weight[priority] × (wait + 2 × late) + 30 × changed + 30 × takes another truck's promise
++ 5 × uses a bigger dock than needed`, where weights are LOW 1, NORMAL 2, HIGH 3, CRITICAL 4.
+Trucks are taken by availability in 60-minute windows, higher priority first within a
+window. So a CRITICAL truck arriving at 10:50 picks before a LOW truck waiting since 08:20,
+but nobody takes a slot before they can use it. **An early truck does not automatically
+win:** SHP1003's request to go now costs the same as moving another truck's promise, so at
+08:22 it keeps its 09:00 slot (ladder case). A promise only protects a slot its truck can
+still reach, so SHP1006's 10:00 slot stops blocking others once its ETA is 11:20.
+
+The **driver chat** offers the earliest feasible slots and doesn't reshuffle other trucks;
+that's the scheduler's job, as a proposal an operator applies.
+
+### 5. When should a pending warehouse confirmation expire?
+
+The snapshot has two (`APT1013A`, `APT1014A`; data issue 13), one with its request still
+`QUEUED`. Our proposal: a `PENDING_CONFIRMATION` booking expires at the earlier of 30
+minutes after booking or 30 minutes before slot start, and then frees the slot. The chat
+itself books `CONFIRMED`, because it runs every facility rule the warehouse would check
+(dock type, weight, events, unload length, last start time) inside one transaction. It
+also writes an `INTERNAL` notice to the warehouse coordinator, so the warehouse is told,
+not asked.
+
+### 6. What happens when no feasible compatible slot exists?
+
+Escalate; never invent capacity. The driver is told operations will call. The exception is
+set to `ESCALATED`, the thread to `ESCALATED`, and an `INTERNAL` message goes to the first
+facility contact that has an email (shift manager, then coordinator). If no contact has an
+email, the message is stored as `FAILED`, never as sent (compare OM004, which went to an
+address that isn't a contact). *Evidence:* ladder case SHP1015 (D5 under maintenance after
+18:00): the message goes to anita.joshi@setuhaul.example and is `SENT`.
+
+### 7. Which actions need deterministic validation even if an LLM suggested them?
+
+All of them that touch capacity or promises:
+- choosing the shipment (only from the driver's own, by a reference the driver wrote)
+- ETA arithmetic (current ETA as of now, plus the delay)
+- dock compatibility, weight, dock events, unload length, last start time
+- holding, confirming and cancelling
+- any time, dock or order number in the reply (`phrasing.check`; otherwise the template is sent)
+
+In agent mode these are guards inside each tool. *Evidence:* `tests/test_agent_mode.py`. A
+scripted model tries to guess a shipment, confirm without an offer, record an ETA for a
+truck in the yard, invent a time, and loop; every attempt is refused.
 
 ---
 
-## 1. Where the agent is used, and where it is not
+## Other decisions
 
-**Choice.** The LLM is used for one job: turning a driver's free text into
-structured fields (`delay_minutes`, `earliest`, `latest_end`, `choice_index`).
-Conversation steps are a fixed workflow (`service.py`). Every capacity
-decision is plain SQL and Python (`tools.py`). The LLM has no database access
-and cannot book anything.
+### Workflow by default, agent as an option
 
-| Part | Workflow or agent | Why |
-|---|---|---|
-| Understand "around 2 hrs late, anything after 7" | Agent (LLM, regex fallback) | Free text with endless phrasings |
-| Decide which step comes next | Workflow | Only 4 states; a fixed path is easier to test |
-| Find compatible free slots | Code (SQL) | Structured, must be exact and repeatable |
-| Book a slot | Code (transaction) | Must be safe under concurrency |
-| Plan a whole facility | Code (dispatch rule) | Structured inputs, needs to be explainable |
+The LLM reads messages and words replies; code picks every step (`service.py`). Agent mode
+(`agent_mode.py`) lets the LLM choose tools through OpenRouter tool calling, over the same
+`Desk`, so both modes apply identical rules and leave the same audit trail. The live
+comparison on the stand-in data was: workflow 12/12, agent 11/12, both with zero false
+promises; the agent was about 35% slower and needed guards for things it tried
+(guessing an identity, computing its own ETA, offering slots to a truck at the gate).
+Workflow stays the default; rerun the comparison on the real data with
+`POST /admin/eval?mode=agent`.
 
-**Reason.** Anthropic's *Building effective agents* advises the simplest
-solution that works. Capacity is a structured decision, so an LLM adds risk
-and cost there and no accuracy.
+### Write into the supplied tables, add only two
 
-**Evidence.** `eval.py` passes all 12 ladder scenarios in offline mode, with
-zero LLM calls. Swapping in the LLM changes only `Extraction`, which is
-validated by Pydantic. If the LLM returns bad JSON, the service falls back to
-the regex extractor (`agent.get_extractor`).
+Conversations go to `chat_threads` / `chat_messages` (intent, extracted ETA, duplicate
+flag, `requires_human_review`). Delays go to `eta_updates` (`DRIVER_DECLARED`, confidence,
+reason) and `driver_exceptions` (one per thread, with `dedupe_key`). Rebookings go to
+`appointments` (old row `CANCELLED`, `is_current = 0`; new row `replaced_appointment_id`).
+Extension slots are marked `BLOCKED` with "Unload extension for APT-…". Notices go to
+`operational_messages`. Only `slot_holds` and `agent_thread_state` are new, because the
+schema has no place for them. The supplied file is never modified; the service works on a
+copy, and `POST /reset` restores it.
 
-**Provider.** OpenRouter (`OPENROUTER_API_KEY`) or Anthropic direct
-(`ANTHROPIC_API_KEY`), chosen by environment variable, with no code change.
-OpenRouter keeps the model swappable (`OPENROUTER_MODEL`) and is called with
-the standard library only. The model gets `temperature 0` and a JSON-only
-response format, because extraction should be repeatable.
+### Unloads longer than a slot use the next slot as an extension
 
-## 1b. LLM writes the reply wording; code owns the facts
+Standard slots are 60 minutes; SHP1005, SHP1009 and SHP1014 need 75 (data issue 4). We
+book the main slot and block the next slot on the same dock, if it's free, as one unit.
+Rebooking releases the old extension. *Evidence:* ladder case SHP1014,
+`test_rebooking_releases_previous_extension`.
 
-**Choice.** The workflow builds every reply as a template filled from the
-database (`service.py`). If an LLM is configured, `phrasing.py` asks it to
-rewrite that template in the driver's language (English, Hindi, Hinglish).
-`phrasing.check()` then requires the LLM version to keep every time
-(with AM/PM), every dock name, the option numbering and any truck number,
-and to add no new times. If the check or the LLM call fails, the template is
-sent. Turn it off with `LLM_REPLIES=0`.
+### Dock type, weight and scarce docks
 
-**Reason.** A reply is a promise. The driver gets a natural message in
-their own language, but the facts in it are guaranteed to be the ones the
-database committed.
+Reefer loads go only to D5 (RULE003). Loads over 25 t, or marked HEAVY, go only to D6
+(RULE004). Standard loads go only to standard docks, so D5 and D6 stay free for the loads
+that can't go anywhere else. Weight is checked against the dock (data issue 3). Among equal
+times, the dock with the least spare weight comes first, keeping the 25 t docks for 21 t loads.
 
-**Evidence.** `tests/test_phrasing.py`: a changed time, a dropped dock, a
-merged option list, a 24-hour time without AM/PM, and an LLM timeout all fall
-back to the template. The booking is identical either way.
+### "Now" is chosen per request
 
-## 1c. Workflow vs agent (LLM tool calling): built both, measured both
+The snapshot is not one moment (data issue 18): records run to 16:30 while ten trucks are
+"in transit" with morning ETAs. Every request carries its own clock, and ETA history is read
+as of that clock. Replaying SHP1013's 09:19 message must not see ETA008, created at 09:20 by
+that same message, or the delay is counted twice.
 
-**What was built.** `app/agent_mode.py` lets the LLM choose the tools
-(`identify_truck`, `report_delay`, `offer_slots`, `confirm_option`,
-`get_booking_status`, `escalate_to_ops`) through OpenRouter tool calling. Every
-tool is guarded in code: identity comes from the phone, a gate-in blocks new
-slots, ETA arithmetic is in code, `confirm_option` only accepts an option this
-conversation was offered, there's a step limit, an LLM outage leads to
-escalation, and replies are fact-checked. Switch per request (`"mode": "agent"`),
-with `AGENT_MODE=agent`, or with the toggle in the UI.
+### Timestamps
 
-**Measured live** (same 12 scenarios, 3 race rounds × 10 drivers, Claude Haiku 4.5
-via OpenRouter; full table in `reports/eval_report.md`):
+All timestamps share `+05:30` (guard 23 is clean), so comparing them as strings is safe.
+SQLite's `datetime()` converts them to UTC, though: SHP1002's 70-minute unload from 08:08
+came out as "03:48". All time arithmetic is done in Python (`timeutil.py`) or with
+`julianday()`. The first version of data check 6 missed two vehicle conflicts because of this.
 
-| | Workflow | Agent |
-|---|---|---|
-| Ladder passed | 12 / 12 | 11 / 12 |
-| False promises / double bookings | 0 / 0 | 0 / 0 |
-| Median time per message | 2.2 s | 3.4 s |
-| LLM-chosen tool calls per message | 0 | 1.5 |
+### Trucks on site
 
-**What live testing showed the agent doing,** each stopped or caught by a guard:
-1. On a shared phone it picked a truck itself instead of asking.
-   `identify_truck` now only accepts a number the driver actually wrote.
-2. It sent its own computed `new_eta` alongside `delay_minutes`, and the
-   planned-ETA arithmetic would have been skipped. Delay now always wins.
-3. It ignored "truck already inside" and called `offer_slots` anyway (found by
-   a test). The gate guard now sits in both tools.
-4. It invented a `latest_end` the driver never said, and once asked the driver
-   for today's date. These were fixed in the prompt; they can't be fully guarded in code.
-5. When a hold expired, it silently re-offered new slots instead of telling the
-   driver the hold had lapsed (the one ladder miss). Nothing wrong was booked.
+Gate-in beats the chat. A truck in the dock gets its status. A truck in the yard keeps its
+slot if the slot is still valid (within the 30-minute no-show grace, RULE002, and the dock
+isn't broken). Otherwise it is re-slotted from now: SHP1004 after 09:30 gets D2 10:00, freed
+by the APT1008 cancellation, and SHP1005 is moved off the broken D3.
 
-**Decision.** The workflow stays the default for the driver booking path. It
-passes every scenario, is about 35% faster, and its behaviour doesn't depend
-on prompt wording. The agent mode is kept because the guards make it safe (zero
-false promises even when the model misbehaved), and it's the right base for
-open-ended operator requests ("move all reefer trucks after the outage") where
-a fixed flow can't anticipate the steps.
+### Duplicates
 
-**The lesson:** the guards, not the prompt, are what keep the agent correct.
-Items 1–3 were real model mistakes that code blocked; items 4–5 are where
-prompt-only control is weaker, and both are visible in the evaluation.
+The same `external_message_id`, or the same text from the same driver within 3 minutes, is
+answered ("already working on it") and logged with `is_duplicate = 1`, but not processed
+again: no second ETA row, no second set of holds (compare THR009, left open in the data).
 
-## 1d. Hold policy under a delay wave
+### Uncertain ETAs
 
-With the LLM on, requests arrive spread over seconds instead of at one
-instant. The first driver then holds all 3 free compatible slots while
-choosing, and the next drivers find none and are escalated. Offline, 3 of 10
-drivers got slots per round; live, 1 of 10 did, in both modes. Correctness held
-(zero double bookings), but capacity was under-used for 2 minutes. Next step:
-hold fewer options when supply is scarce (e.g. hold 1 when 3 or fewer compatible
-slots are free) and release unchosen holds as soon as one is confirmed (already done).
+A range ("between 12:30 and 13:00") is planned at its later end with `confidence = LOW`, and
+`requires_human_review` is set. A relative delay is added to the current ETA, and the reply
+states the arithmetic ("11:00 AM (10:00 AM plus 60 min)") so the driver can correct it.
 
-## 2. Ask the driver vs look it up
+### Known limits
 
-**Choice.** The driver is asked only for things the backend cannot know:
-their new ETA, time limits ("leave by 9") and their option choice. Shipment,
-truck, load type, weight, facility, compatible docks and current booking all
-come from the database.
-
-**Exception.** If one phone number maps to more than one open shipment, the
-backend can't tell who is writing, so the service asks for the truck number.
-It then resumes the parked message so the driver doesn't repeat themselves.
-
-**Evidence.** Data issue 13 (shared phone `+919800000018`). Scenario "Shared
-phone: ask truck number, then resume" gives `ask_vehicle → offered → confirmed`.
-
-## 3. Driver vs backend: who wins
-
-**Choice.**
-- Gate check-in beats the driver. If the gate logged the truck in, "I'm 1 hour
-  late" gets "you're already inside, see the dock supervisor", not a new slot.
-- ETA trust order: `ops_override` first, then the newest of driver, warehouse
-  and plan.
-
-**Reason.** Gate-in is physical evidence; a chat message is a claim. Ops
-overrides exist because operations know something the driver doesn't (road
-closure, convoy).
-
-**Evidence.** Scenario "Gate shows truck already inside". Scenario "Window +
-maintenance block + ops override ETA" gives ETA 14:30 (ops 11:30 + 3h), not
-15:30 (driver 12:30 + 3h). Data issue 8 shows SH-02's sources disagree.
-
-## 4. Preventing two drivers being promised the same slot
-
-**Choice.** Three layers, plus one rule.
-1. **Holds.** An offered slot is reserved for 2 minutes in `slot_holds`.
-   A partial unique index allows only one active hold per slot, so two
-   conversations can't offer the same slot.
-2. **Conditional update.** `confirm` runs
-   `UPDATE slot_holds SET status='confirmed' WHERE id=? AND status='active' AND expires_at > now`
-   inside `BEGIN IMMEDIATE`. A hold can be used once and only while valid.
-3. **Database guard.** The supplied partial unique index on active
-   appointments rejects any second booking for a slot.
-4. **Rule.** The confirmation message is sent and logged only after `COMMIT`.
-
-**Alternatives rejected.**
-- *Check then insert in app code*: has the race the brief describes.
-- *Global lock / single worker queue*: correct, but serialises every driver
-  during a delay wave, which is exactly when speed matters.
-- *Optimistic retry only (no holds)*: safe, but drivers would often pick a
-  slot that's gone by the time they reply.
-
-**Evidence.** `eval.py` part B: 30 rounds × 10 simultaneous conversations
-= 300. Zero slots promised twice, zero false promises, zero double bookings.
-`tests/test_concurrency.py` races `hold_slot`, `book_direct` (no holds at
-all) and 10 confirms of the same hold. Exactly one wins each time.
-
-## 5. Hold duration: 2 minutes
-
-**Choice.** 2 minutes, configurable (`tools.HOLD_MINUTES`).
-
-**Reason.** Long enough to read 3 options on a phone and reply. Short enough
-that unanswered offers don't freeze scarce slots during a delay wave. If a
-hold expires, the driver gets an honest "no longer available" and a fresh
-search, never a false confirmation.
-
-**Evidence.** Scenario "Hold expires before driver answers" gives
-`confirm_failed`, and SH-06 keeps its original booking.
-
-## 6. What counts as a usable slot
-
-`find_options` checks everything the two unique indexes do **not** cover:
-
-| Check | Why | Planted case |
-|---|---|---|
-| Same facility as the shipment | Wrong-city booking | SH-10 (issue 5) |
-| Dock active | Dock under repair | JAI-D5 (issue 11) |
-| Reefer / weight compatible | Spoiled or unhandled load | SH-09 (issue 4) |
-| Slot ends after it starts | Corrupt slot | AMD-A2-BAD (issue 9) |
-| Slot length ≥ unload time | Overrun into next truck | SH-13 (issue 10) |
-| No overlapping active booking on the dock | Different slot rows, same time | JAI-D1-1030 (issues 1–2) |
-| No blocked window | Maintenance, outage | JAI-D2 14–16 (issue 3) |
-| No live hold by another driver | Race safety | — |
-| Not in the past | Can't arrive yesterday | — |
-
-**Ranking.** Earliest first. At equal times, general docks come before
-reefer and heavy docks, so scarce docks stay free for loads that need them.
-
-## 7. When nothing fits: escalate, never invent
-
-**Choice.** If no compatible slot exists in the window, the driver is told
-operations will call, and the reply is logged with action `escalate`.
-
-**Evidence.** Scenario "Unload longer than any slot" (SH-13, 90 minutes).
-In the race, drivers beyond the 3 free compatible docks are escalated
-(210 of 300), and none are given a false slot.
-
-## 8. Offer 3 options, not 1 and not 10
-
-**Choice.** Up to 3 held options.
-
-**Reason.** One option forces another round trip when it doesn't suit.
-More than 3 is hard to read on a phone, and every option holds scarce
-capacity for 2 minutes.
-
-## 9. Scheduling tool objective
-
-**Choice.** A transparent greedy dispatch rule (`scheduler.py`), not CP-SAT.
-
-`score = priority × (1·wait_min + 2·late_min) + 30·changed + 30·intrudes + 5·scarce_dock`
-
-In plain words: less waiting, fewer missed appointments, fewer changes to a
-schedule already told to a driver, don't take another truck's promised time,
-and keep reefer and heavy docks for loads that need them. Trucks already
-unloading are fixed tasks; gate-in counts as arrived now.
-
-**Why not CP-SAT yet.** With 9 docks and ~20 trucks a day per facility, the
-greedy rule gives schedules an operator can check by hand, and every choice
-can be explained from the score. CP-SAT becomes worth it when greedy leaves
-measurable waiting on the table at real scale. The scheduler's interface
-(structured inputs → proposed sequence) lets a solver drop in later.
-
-**Evidence.** `tests/test_scheduler.py` and `python demo.py` part 2 at
-Ahmedabad 13:55: SH-20 unloading is fixed; SH-21 (90 min early, at gate) is
-served now on a free dock; SH-19 (late) starts at its new ETA with 0 wait;
-SH-10's wrong-facility booking is moved to an Ahmedabad dock; SH-18 keeps its
-promise. At Jaipur, 5 of 5 clean bookings are kept unchanged.
-
-## 10. Audit trail
-
-Every booking change writes `appointment_history`. Every confirmation sent
-writes `outbound_confirmations`. Every message in and out writes `messages`.
-
-**Reason.** Data issue 15 shows why: SH-21 was told 13:00, then moved to
-15:00 with no new message. With the trail, a query finds every driver whose
-last confirmation no longer matches the database.
-
-## 11. Scale beyond the snapshot
-
-The snapshot has 2 facilities and 21 shipments; the design targets more.
-
-- **Database.** Move to PostgreSQL. The same partial unique indexes exist
-  there, and `BEGIN IMMEDIATE` becomes a normal transaction with the unique
-  index as the guard (or `SELECT ... FOR UPDATE SKIP LOCKED` for holds).
-- **App.** The service is stateless (state lives in `conversations`), so
-  more API instances can run behind a load balancer.
-- **Hold sweeper.** Expired holds are cleaned lazily on each write; at scale,
-  add a periodic job.
-- **LLM cost.** One short extraction call per inbound message, no calls for
-  capacity. A delay wave of 500 messages is 500 small calls.
-
-## 12. Known limits
-
-- Built against a stand-in schema; table names change when the real database
-  arrives (`db.py`, the SQL in `tools.py` and `analysis/data_issues.sql`).
-- The regex extractor handles English and simple Hinglish ("bhai", "haan");
-  free Hindi text needs the LLM path.
-- Slots are fixed rows. Unloads longer than one slot (combining two
-  consecutive slots) are escalated, not auto-booked.
-- No live GPS, as stated in the brief; ETAs are only as good as their source.
+- The extractor's offline regex covers the dataset's English phrasing. Hindi and Hinglish
+  need the LLM (OpenRouter), which is on in the deployment.
+- The scheduler is greedy, not optimal; it shows its score so every choice can be
+  explained. CP-SAT would be the next step if greedy leaves measurable waiting at real scale.
+- A truck can't yet be booked across two non-adjacent slots, and dock overruns (SHP1002) are
+  read from `facility_checkins`, not predicted.
+- Pending-confirmation expiry (question 5) is proposed, not automated.

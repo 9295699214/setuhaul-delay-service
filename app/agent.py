@@ -19,18 +19,26 @@ FMT = "%Y-%m-%d %H:%M"
 
 
 class Extraction(BaseModel):
-    intent: str = Field("unknown", description="report_delay | choose_option | confirm | ask_status | unknown")
+    intent: str = Field("unknown", description="report_delay | ask_slots | ask_status | early_arrival | "
+                                               "choose_option | confirm | unknown")
     delay_minutes: int | None = None
     new_eta: str | None = None            # 'YYYY-MM-DD HH:MM' if driver gave a clock time
-    earliest: str | None = None           # "anything after 7"
-    latest_end: str | None = None         # "need to leave by 9"
+    earliest: str | None = None           # "anything after 7", "any slot after 12"
+    latest_end: str | None = None         # "need to leave by 9", "leave before 1:30"
     choice_index: int | None = None       # 1-based: "the second one" -> 2
+    confidence: str = "MEDIUM"            # HIGH: exact time; LOW: a range or "maybe"
+    delay_reason: str | None = None       # TRAFFIC | BREAKDOWN | WEATHER | LATE_DEPARTURE | LOADING_DELAY | ROUTE_ISSUE | OTHER
+    reference: str | None = None          # order number or truck number the driver typed
 
 
 # ------------------------------------------------------------ rule based
 
 _WORD_NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "half": 0.5, "an": 1, "a": 1}
-_ORDINAL = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3}
+_ORDINAL = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3,
+            "pehla": 1, "pehli": 1, "doosra": 2, "dusra": 2, "doosri": 2, "teesra": 3, "teesri": 3}
+_REASONS = [("TRAFFIC", r"traffic|jam"), ("BREAKDOWN", r"tyre|tire|puncture|breakdown|engine|repair"),
+            ("WEATHER", r"rain|fog|weather|storm"), ("LOADING_DELAY", r"loading|released me late|\borigin\b"),
+            ("ROUTE_ISSUE", r"diversion|road closed|route"), ("LATE_DEPARTURE", r"left late|late departure")]
 
 
 def _clock(hour: int, minute: int, ampm: str | None, now: datetime) -> str:
@@ -41,7 +49,7 @@ def _clock(hour: int, minute: int, ampm: str | None, now: datetime) -> str:
     else:
         cand = now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
         if cand < now and hour < 12:
-            cand += timedelta(hours=12)     # "after 7" said at 2pm means 7pm
+            cand += timedelta(hours=12)     # "ETA 6:30" said at 16:24 means 18:30
     if cand < now:
         cand += timedelta(days=1)
     return cand.strftime(FMT)
@@ -55,7 +63,7 @@ def rule_extract(text: str, now: str) -> Extraction:
     n = datetime.strptime(now, FMT)
     out = Extraction()
 
-    # delay: "2 hrs", "1.5 hours", "two hours", "45 min"
+    # delay: "2 hrs", "1.5 hours", "late by one hour", "45 minutes"
     m = re.search(r"\b(\d+(?:\.\d+)?|one|two|three|four|half|an|a)\s*(?:hrs?|hours?|h\b)", t)
     if m:
         v = m.group(1)
@@ -64,30 +72,52 @@ def rule_extract(text: str, now: str) -> Extraction:
     if m:
         out.delay_minutes = (out.delay_minutes or 0) + int(m.group(1))
 
-    m = re.search(r"(?:reach|arrive|there)\w*\s+(?:by|at|around)\s+" + _TIME, t)
+    # a range: "between 12:30 and 13:00" -> the later end, low confidence
+    m = re.search(r"between\s+" + _TIME + r"\s+(?:and|-|to)\s+" + _TIME, t)
     if m:
-        out.new_eta = _clock(int(m.group(1)), int(m.group(2) or 0), m.group(3), n)
+        out.new_eta = _clock(int(m.group(4)), int(m.group(5) or 0), m.group(6), n)
+        out.confidence = "LOW"
+    else:
+        m = re.search(r"(?:\beta|reach\w*|arriv\w*|there|come)\s+(?:by\s+|at\s+|around\s+|in\s+)?(?:around\s+)?" + _TIME, t)
+        if m and not re.match(r"\s*(?:hrs?|hours?|mins?|minutes?)", t[m.end():]):
+            out.new_eta = _clock(int(m.group(1)), int(m.group(2) or 0), m.group(3), n)
+            out.confidence = "MEDIUM" if re.search(r"around|about|approx|maybe", t) else "HIGH"
     m = re.search(r"(?:after|from)\s+" + _TIME, t)
     if m:
         out.earliest = _clock(int(m.group(1)), int(m.group(2) or 0), m.group(3), n)
-    m = re.search(r"(?:leave|done|finish|out)\s+by\s+" + _TIME, t)
+    m = re.search(r"(?:leave|done|finish|out|nikal)\w*(?:\s+\w+){0,3}?\s+(?:by|before)\s+" + _TIME, t)
     if m:
         out.latest_end = _clock(int(m.group(1)), int(m.group(2) or 0), m.group(3), n)
 
+    short = len(t.split()) <= 6 or re.search(r"\b(one|option|wala|slot)\b\s*(?:is|works|please|theek)?", t)
     for word, idx in _ORDINAL.items():
-        if re.search(rf"\b{word}\b", t):
+        if short and re.search(rf"\b{word}\b(?!\s+possible)", t) and not re.search(r"possible|available", t):
             out.choice_index = idx
     m = re.fullmatch(r"\s*(?:option\s*)?([1-3])\s*", t)
     if m:
         out.choice_index = int(m.group(1))
+    m = re.search(r"\b(ord-?\d{6}-?\d{3}|shp\d{4}|[a-z]{2}\d{2}[a-z]{2}\d{4})\b", t.replace(" ", ""))
+    if m:
+        out.reference = m.group(1).upper()
+    elif re.fullmatch(r"\s*(?:order\s*)?0\d{2}\s*", t):
+        out.reference = t.strip()
+    for code, pat in _REASONS:
+        if re.search(pat, t):
+            out.delay_reason = code
+            break
 
+    hypothetical = re.search(r"\bif i (?:reach|come|arrive)|what slots|which slots|slots are possible", t)
     if out.choice_index:
         out.intent = "choose_option"
-    elif out.delay_minutes or out.new_eta or "late" in t or "delay" in t or "stuck" in t:
+    elif hypothetical:
+        out.intent = "ask_slots"
+    elif re.search(r"already at the gate|at the gate|reached early|i am here|in the yard", t) and not out.delay_minutes:
+        out.intent = "early_arrival" if "late" not in t else "ask_status"
+    elif out.delay_minutes or out.new_eta or re.search(r"\blate\b|delay|stuck|traffic|tyre|eta\b", t):
         out.intent = "report_delay"
     elif re.search(r"\b(yes|ok|okay|haan|fine|sure)\b", t):
         out.intent = "confirm"
-    elif "slot" in t or "status" in t:
+    elif re.search(r"slot|status|assigned|active", t):
         out.intent = "ask_status"
     return out
 
@@ -96,9 +126,11 @@ def rule_extract(text: str, now: str) -> Extraction:
 
 SYSTEM_PROMPT = """You extract fields from a truck driver's message to a logistics company.
 Drivers write in English, Hindi or Hinglish. Return ONLY a JSON object with keys:
-intent, delay_minutes, new_eta, earliest, latest_end, choice_index.
+intent, delay_minutes, new_eta, earliest, latest_end, choice_index, confidence, delay_reason, reference.
 
-- intent: report_delay | choose_option | confirm | ask_status | unknown
+- intent: report_delay (driver is/will be late) | ask_slots (only asking what is possible, e.g.
+  "what slots if I reach 12:45?") | ask_status ("is my slot active?", "has a dock been assigned?") |
+  early_arrival ("I'm already at the gate") | choose_option | confirm | unknown
 - delay_minutes: integer, when the driver says HOW LATE they are ("2 hrs late",
   "do ghante late", "45 min der"). Do NOT convert this into new_eta; the backend
   adds it to the planned arrival time, which you do not know.
@@ -107,6 +139,10 @@ intent, delay_minutes, new_eta, earliest, latest_end, choice_index.
 - earliest: start of a window the driver accepts ("anything after 7", "1 baje ke baad").
 - latest_end: when the driver must be finished ("leave by 9", "10 se pehle nikalna hai").
 - choice_index: 1-based option the driver picks ("2", "the second one", "doosra wala").
+- confidence: HIGH for an exact time, MEDIUM for "around 11:20" or a relative delay, LOW for a
+  range ("between 12:30 and 1") or vague words; for a range put the LATER time in new_eta.
+- delay_reason: TRAFFIC | BREAKDOWN | WEATHER | LATE_DEPARTURE | LOADING_DELAY | ROUTE_ISSUE | OTHER, or null.
+- reference: an order number (e.g. ORD-260804-020 or just "020") or truck number the driver wrote, else null.
 Clock times are absolute 'YYYY-MM-DD HH:MM' in Asia/Kolkata, resolved against the given
 current time; a bare hour means the next such time after now. Use null for anything the
 driver did not say. Never guess facts the driver did not state."""
@@ -116,7 +152,8 @@ def _user_content(text: str, now: str, offered: list[dict] | None) -> str:
     context = f"Current time: {now}\n"
     if offered:
         context += "Options already offered (1-based): " + json.dumps(
-            [o["start_at"] + " " + o["dock_name"] for o in offered]) + "\n"
+            [o.get("start", o.get("start_at", ""))[11:16] + " Dock " + o.get("dock_code", o.get("dock_name", ""))
+             for o in offered]) + "\n"
     return context + "Driver message: " + text
 
 

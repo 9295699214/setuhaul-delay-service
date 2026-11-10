@@ -1,88 +1,88 @@
 """Agent mode: the LLM decides which tool to call; code guards every tool.
 
-Same interface as ConversationService.handle(), so the evaluation can run
-both modes on the same scenarios.
+Same interface as ConversationService.handle(), and the same Desk underneath, so
+both modes apply identical facility rules and write the same records.
 
-What the LLM may do: choose tools and their arguments, and write the reply.
-What code enforces, whatever the LLM asks:
-  * identity comes from the phone; a truck number must match one of its shipments
-  * a truck the gate logged in gets no new slot
-  * ETA arithmetic (planned/ops-override ETA + delay) is done in code
-  * offer_slots runs the full compatibility query and holds slots atomically
-  * confirm_option only accepts an option number this conversation was offered,
-    and the booking is the same atomic confirm() the workflow uses
+The LLM may: choose tools and arguments, and write the reply.
+Code enforces, whatever the LLM asks (design question 7):
+  * identity comes from the phone; a shipment can only be chosen from the driver's
+    own open shipments, by a reference the driver actually wrote
+  * a truck the gate has logged in is planned from now, not from a declared ETA
+  * ETA arithmetic (current ETA as of now + delay) is done in code; a stated delay
+    beats any ETA the model computed itself
+  * offer_slots runs the full compatibility query (dock type, weight, dock events,
+    unload length, last start time) and holds slots atomically
+  * confirm_option only accepts an option this thread was offered
   * at most MAX_STEPS tool calls per message, then escalate
-  * the reply must contain the exact times/docks the tools returned, else a
-    code template is sent
+  * the reply must contain exactly the times/docks the tools returned, else a template
 """
 import json
-from datetime import datetime
 
+from . import timeutil as tu
 from . import tools
 from .agent import get_llm
+from .desk import EMPTY_FACTS, Desk, dock_label
 from .phrasing import check
 
-FMT = tools.FMT
 MAX_STEPS = 6
 
-
-def _hhmm(ts: str) -> str:
-    return datetime.strptime(ts, FMT).strftime("%I:%M %p").lstrip("0")
-
-
 AGENT_PROMPT = """You are SetuHaul Logistics' dock-booking assistant, chatting on WhatsApp with a truck
-driver who may be running late. Drivers write in English, Hindi or Hinglish; reply in the same
-language and script, briefly (max 3 short lines plus any option list), no emojis.
+driver. Drivers write in English, Hindi or Hinglish; reply in the same language and script,
+briefly (max 3 short lines plus any option list), no emojis.
 
 Use the tools to act. Rules:
-- Never state an ETA, slot time or dock that a tool did not return. Copy times (e.g. "12:00 PM")
-  and dock names exactly as the tool gives them.
-- If several trucks share this phone, ask the driver for the truck number, then call identify_truck
-  with the number they wrote. Never pick a truck yourself.
-- When the driver says how late they are or when they will arrive, call report_delay
-  (use delay_minutes for "X hours/min late"; new_eta only for a stated clock time), then call
-  offer_slots and list the returned options numbered exactly as given.
-- Pass earliest / latest_end to offer_slots ONLY if the driver stated such a limit. Never invent one.
-- "1 ghanta late", "do ghante", "45 min der" are delays: call report_delay right away.
-- If the driver only says they are late without how late, ask how late. Do not guess.
-  Never ask for the date; the backend knows it.
+- Never state an ETA, slot time, dock or order number that a tool did not return. Copy times
+  (e.g. "12:00 PM") and dock names (e.g. "Dock D5 (reefer)") exactly as the tool gives them.
+- If the backend facts say the shipment is not identified, ask which order it is about (list the
+  order numbers from the facts), then call identify_shipment with what the driver wrote. Never pick one yourself.
+- When the driver says how late they are or when they will arrive, call report_delay (delay_minutes
+  for "X hours/min late"; new_eta only for a stated clock time), then offer_slots. List the options
+  numbered exactly as returned.
+- Pass earliest / latest_end ONLY if the driver stated such a limit. Never invent one.
+- If the driver only asks what is possible ("what slots if I reach 12:45?"), call offer_slots with
+  earliest set; do not call report_delay.
+- If the driver is at the gate or in the yard, call offer_slots (the system plans from now) or
+  get_booking_status. Do not ask for an ETA.
+- If the driver only says they are late without how late, ask how late. Never ask for the date.
 - Only call confirm_option after options were offered and the driver picked one.
-- If no slots are available, tell the driver operations will call (escalate_to_ops).
-- Don't ask for things the tools already know (truck type, load, dock compatibility)."""
+- If offer_slots finds nothing, the system has already escalated: tell the driver operations will call.
+- Don't ask for things the backend knows (truck type, load, weight, dock compatibility)."""
 
 TOOLS = [
     {"type": "function", "function": {
-        "name": "identify_truck",
-        "description": "Pick which shipment the driver is on when several trucks share this phone.",
+        "name": "identify_shipment",
+        "description": "Choose which of the driver's shipments the chat is about, by the order number or truck number the driver wrote.",
         "parameters": {"type": "object", "properties": {
-            "truck_number": {"type": "string", "description": "Vehicle registration, e.g. GJ01AB1019"}},
-            "required": ["truck_number"]}}},
+            "reference": {"type": "string", "description": "e.g. ORD-260804-020, 020, or MH04HV4107"}},
+            "required": ["reference"]}}},
     {"type": "function", "function": {
         "name": "report_delay",
         "description": "Record the driver's new arrival estimate. The system computes the ETA.",
         "parameters": {"type": "object", "properties": {
             "delay_minutes": {"type": "integer", "description": "How late, in minutes"},
-            "new_eta": {"type": "string", "description": "Stated arrival clock time 'YYYY-MM-DD HH:MM'"}}}}},
+            "new_eta": {"type": "string", "description": "Stated arrival clock time 'YYYY-MM-DD HH:MM'"},
+            "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+            "reason": {"type": "string", "enum": ["TRAFFIC", "BREAKDOWN", "WEATHER", "LATE_DEPARTURE",
+                                                   "LOADING_DELAY", "ROUTE_ISSUE", "OTHER"]}}}}},
     {"type": "function", "function": {
         "name": "offer_slots",
-        "description": "Find compatible free dock slots after the recorded ETA and hold up to 3 for 2 minutes.",
+        "description": "Find compatible free dock slots (after the ETA, or from now if the truck is on site) and hold up to 3 for 2 minutes.",
         "parameters": {"type": "object", "properties": {
             "earliest": {"type": "string", "description": "Driver accepts slots only after 'YYYY-MM-DD HH:MM'"},
-            "latest_end": {"type": "string", "description": "Driver must finish by 'YYYY-MM-DD HH:MM'"}}}}},
+            "latest_end": {"type": "string", "description": "Driver must finish unloading by 'YYYY-MM-DD HH:MM'"}}}}},
     {"type": "function", "function": {
         "name": "confirm_option",
         "description": "Book the option the driver picked from the list offered in this conversation.",
-        "parameters": {"type": "object", "properties": {
-            "option_number": {"type": "integer"}}, "required": ["option_number"]}}},
+        "parameters": {"type": "object", "properties": {"option_number": {"type": "integer"}},
+                       "required": ["option_number"]}}},
     {"type": "function", "function": {
         "name": "get_booking_status",
-        "description": "The driver's current booked slot, if any.",
+        "description": "The driver's current slot, check-in or unloading status.",
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
         "name": "escalate_to_ops",
-        "description": "Hand over to the operations team (no suitable slot, or a request you cannot handle).",
-        "parameters": {"type": "object", "properties": {
-            "reason": {"type": "string"}}, "required": ["reason"]}}},
+        "description": "Hand over to the operations team (a request you cannot handle).",
+        "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]}}},
 ]
 
 
@@ -95,219 +95,168 @@ class AgentService:
         if self.llm is None or not hasattr(self.llm, "chat_tools"):
             raise RuntimeError("agent mode needs OPENROUTER_API_KEY (tool calling)")
 
-    # -- state --------------------------------------------------------------
-    def _load(self, cid):
-        row = self.conn.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
-        return dict(row) if row else {"state": "new", "offered_json": "[]", "shipment_id": None,
-                                       "pending_text": None}
+    # ---------------------------------------------------------------- tools (guards live here)
+    def _sh(self, ctx):
+        if not ctx["desk"].state["shipment_id"]:
+            return None, {"error": "Shipment not identified. Ask which order this is about.",
+                          "orders": [c["order_reference"] for c in ctx["candidates"]]}
+        return tools.get_shipment(self.conn, ctx["desk"].state["shipment_id"]), None
 
-    def _save(self, st, now):
-        self.conn.execute(
-            "INSERT INTO conversations (id,phone,shipment_id,state,offered_json,pending_text,updated_at) "
-            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET shipment_id=excluded.shipment_id, "
-            "state=excluded.state, offered_json=excluded.offered_json, updated_at=excluded.updated_at",
-            (st["cid"], st["phone"], st["sid"], st["state"], json.dumps(st["offered"]), None, now))
+    def t_identify_shipment(self, ctx, reference=""):
+        ref = tools.norm_ref(reference)
+        said = tools.norm_ref(" ".join(ctx["driver_texts"]))
+        if not ref or ref not in said:
+            return {"error": "The driver has not written this reference. Ask them; do not guess.",
+                    "orders": [c["order_reference"] for c in ctx["candidates"]]}
+        regs = [c["reg_no"] for c in ctx["candidates"]]
+        named = [c for c in ctx["candidates"]
+                 if ref in (tools.norm_ref(c["order_reference"]), tools.norm_ref(c["shipment_id"]))
+                 or (len(ref) == 3 and c["order_reference"].endswith(ref))
+                 or (regs.count(c["reg_no"]) == 1 and ref == tools.norm_ref(c["reg_no"]))]
+        if len(named) != 1:
+            return {"error": "That reference does not match exactly one of the driver's shipments.",
+                    "orders": [c["order_reference"] for c in ctx["candidates"]]}
+        ctx["desk"].state["shipment_id"] = named[0]["shipment_id"]
+        ctx["desk"].set_thread(shipment_id=named[0]["shipment_id"])
+        return {"status": "identified", "order": named[0]["order_reference"]}
 
-    def _log(self, cid, direction, body, now, action=None):
-        self.conn.execute("INSERT INTO messages (conversation_id,direction,body,at,action) VALUES (?,?,?,?,?)",
-                          (cid, direction, body, now, action))
-
-    def _history(self, cid, limit=10):
-        rows = self.conn.execute("SELECT direction, body FROM messages WHERE conversation_id=? "
-                                 "ORDER BY id DESC LIMIT ?", (cid, limit)).fetchall()
-        return [{"role": "user" if r["direction"] == "in" else "assistant", "content": r["body"]}
-                for r in reversed(rows)]
-
-    # -- tools (guards live here) -------------------------------------------
-    def _need_shipment(self, st):
-        if st["sid"] is None:
-            return {"error": "Truck not identified yet. Ask the driver for their truck number."}
-        return None
-
-    def t_identify_truck(self, st, truck_number=""):
-        typed = tools.norm_reg(truck_number)
-        said = tools.norm_reg(" ".join(st["driver_texts"]))
-        if not typed or typed not in said:
-            return {"error": "The driver has not written this truck number. Ask them for it; do not guess.",
-                    "trucks_on_this_phone": [c["reg_no"] for c in st["candidates"]]}
-        match = [c for c in st["candidates"] if c["reg_no"] and tools.norm_reg(c["reg_no"]) == typed]
-        if len(match) != 1:
-            return {"error": "No truck with that number on this phone.",
-                    "trucks_on_this_phone": [c["reg_no"] for c in st["candidates"]]}
-        st["sid"] = match[0]["id"]
-        return {"status": "identified", "truck": match[0]["reg_no"]}
-
-    def _gate_guard(self, st):
-        """Backend beats driver: a truck the gate logged in gets no new slot."""
-        gate = tools.gate_status(self.conn, st["sid"])
-        if gate and gate["event"] == "gate_in":
-            st["facts"] = {"times": [_hhmm(gate["at"])], "docks": [], "options": [], "truck_regs": []}
-            st["template"] = (f"Our gate shows your truck checked in at {_hhmm(gate['at'])}. "
-                              "Please go to the dock supervisor; no new slot is needed.")
-            st["state"], st["offered"] = "new", []
-            return {"status": "already_arrived", "gate_in_at": _hhmm(gate["at"]),
-                    "note": "Truck is already inside. Do not offer slots."}
-        return None
-
-    def t_report_delay(self, st, delay_minutes=None, new_eta=None):
-        if err := self._need_shipment(st):
+    def t_report_delay(self, ctx, delay_minutes=None, new_eta=None, confidence="MEDIUM", reason=None):
+        sh, err = self._sh(ctx)
+        if err:
             return err
-        if blocked := self._gate_guard(st):
-            return blocked
+        if tools.on_site(sh):
+            return {"status": "on_site", "gate_in_at": tu.hhmm(sh["gate_in_ts"]),
+                    "note": "The gate has logged this truck in. Do not record an ETA; call offer_slots."}
+        desk = ctx["desk"]
         if delay_minutes is not None:
-            new_eta = None          # relative delay wins: the backend adds it to the planned ETA
-        if new_eta:
+            new_eta = None                     # relative delay wins: the backend adds it to the current ETA
+            if not 0 <= int(delay_minutes) <= 24 * 60:
+                return {"error": "delay_minutes must be 0-1440"}
+            base = tools.current_eta(self.conn, sh["shipment_id"], desk.now)
+            eta = tu.add(max(base["eta"], desk.now), int(delay_minutes))
+        elif new_eta:
             try:
-                datetime.strptime(new_eta, FMT)
+                eta = tu.norm(new_eta)
             except ValueError:
                 return {"error": "new_eta must be 'YYYY-MM-DD HH:MM'"}
-            eta = new_eta
-        elif delay_minutes is not None and 0 <= int(delay_minutes) <= 24 * 60:  # noqa: SIM114
-            base = tools.current_eta(self.conn, st["sid"])
-            eta = tools._add(max(base["eta"] if base else st["now"], st["now"]), int(delay_minutes))
         else:
-            return {"error": "Give delay_minutes (0-1440) or new_eta."}
-        self.conn.execute("BEGIN IMMEDIATE")
-        tools.record_eta(self.conn, st["sid"], eta, "driver", st["now"])
-        self.conn.execute("COMMIT")
-        st["eta"] = eta
-        return {"status": "eta_recorded", "eta": _hhmm(eta)}
+            return {"error": "Give delay_minutes or new_eta."}
+        confidence = confidence if confidence in ("HIGH", "MEDIUM", "LOW") else "MEDIUM"
+        reason = reason if reason in ("TRAFFIC", "BREAKDOWN", "WEATHER", "LATE_DEPARTURE", "LOADING_DELAY",
+                                      "ROUTE_ISSUE", "OTHER") else None
+        desk.record_delay(sh, eta=eta, confidence=confidence, reason=reason, note=ctx["text"],
+                          delay=delay_minutes, earliest=None, latest=None)
+        ctx["eta"] = eta
+        return {"status": "eta_recorded", "eta": tu.hhmm(eta)}
 
-    def t_offer_slots(self, st, earliest=None, latest_end=None):
-        if err := self._need_shipment(st):
+    def t_offer_slots(self, ctx, earliest=None, latest_end=None):
+        sh, err = self._sh(ctx)
+        if err:
             return err
-        if blocked := self._gate_guard(st):
-            return blocked
-        if not st.get("eta"):
-            base = tools.current_eta(self.conn, st["sid"])
-            if not base:
-                return {"error": "ETA unknown. Ask how late the driver is, then call report_delay."}
-            st["eta"] = max(base["eta"], st["now"])
-        for v in (earliest, latest_end):
-            if v:
-                try:
-                    datetime.strptime(v, FMT)
-                except ValueError:
-                    return {"error": "times must be 'YYYY-MM-DD HH:MM'"}
-        tools.release_holds(self.conn, st["cid"])
-        start = max(st["eta"], earliest or st["eta"])
-        cands = tools.find_options(self.conn, st["sid"], start, latest_end, now=st["now"], limit=6)
-        offered = []
-        for c in cands:
-            h = tools.hold_slot(self.conn, c["slot_id"], st["sid"], st["cid"], st["now"])
-            if h["ok"]:
-                offered.append({**c, "hold_id": h["hold_id"]})
-            if len(offered) == 3:
-                break
-        st["offered"] = offered
-        if not offered:
-            st["state"] = "new"
-            st["facts"] = {"times": [], "allowed_times": [_hhmm(st["eta"])], "docks": [], "options": [],
-                           "truck_regs": []}
-            st["template"] = (f"Noted, new ETA {_hhmm(st['eta'])}. No suitable dock slot is free in that "
-                              "window. Our operations team will call you shortly.")
-            return {"status": "no_slots", "eta": _hhmm(st["eta"]),
-                    "note": "Tell the driver operations will call."}
-        st["state"] = "offered"
-        lines = [f"{i}. {_hhmm(o['start_at'])} - {o['dock_name']}" for i, o in enumerate(offered, 1)]
-        st["template"] = (f"Noted, new ETA {_hhmm(st['eta'])}. These slots are held for you for "
-                          f"{tools.HOLD_MINUTES} minutes:\n" + "\n".join(lines) + "\nReply with the option number.")
-        st["facts"] = {"times": sorted({_hhmm(o["start_at"]) for o in offered}),
-                       "allowed_times": [_hhmm(st["eta"])],
-                       "docks": sorted({o["dock_name"] for o in offered}),
-                       "options": [str(i) for i in range(1, len(offered) + 1)], "truck_regs": []}
-        return {"status": "offered", "eta": _hhmm(st["eta"]), "held_minutes": tools.HOLD_MINUTES,
-                "options": [{"option": i, "time": _hhmm(o["start_at"]), "dock": o["dock_name"]}
-                            for i, o in enumerate(offered, 1)]}
+        desk = ctx["desk"]
+        try:
+            earliest = tu.norm(earliest) if earliest else None
+            latest_end = tu.norm(latest_end) if latest_end else None
+        except ValueError:
+            return {"error": "times must be 'YYYY-MM-DD HH:MM'"}
+        if sh.get("queue_state") == "IN_DOCK":
+            res = desk.status(sh)
+        elif tools.on_site(sh):
+            res = desk.handle_on_site(sh, "ask_status")
+        else:
+            eta = ctx.get("eta") or tools.current_eta(self.conn, sh["shipment_id"], desk.now)["eta"]
+            res = desk.offer(sh, max(eta, earliest or eta), latest_end, eta)
+        ctx["result"] = res
+        out = {"status": res["action"], "message_for_driver": res["reply"]}
+        if res["action"] == "offered":
+            out["options"] = [{"option": i, "time": tu.hhmm(o["start"]), "dock": dock_label(o["dock_code"], o["dock_type"])}
+                              for i, o in enumerate(res["options"], 1)]
+        return out
 
-    def t_confirm_option(self, st, option_number=0):
-        if err := self._need_shipment(st):
+    def t_confirm_option(self, ctx, option_number=0):
+        sh, err = self._sh(ctx)
+        if err:
             return err
-        if st["state"] != "offered" or not st["offered"]:
-            return {"error": "No options have been offered in this conversation. Offer slots first."}
-        if not 1 <= int(option_number) <= len(st["offered"]):
-            return {"error": f"Option must be 1-{len(st['offered'])}."}
-        chosen = st["offered"][int(option_number) - 1]
-        res = tools.confirm(self.conn, chosen["hold_id"], st["now"])
-        if not res["ok"]:
-            st["state"], st["offered"] = "new", []
-            st["facts"] = {"times": [], "docks": [], "options": [], "truck_regs": []}
-            st["template"] = ("Sorry, that slot is no longer available (the hold expired). "
-                              "Tell me your ETA again and I'll find new options.")
-            return {"status": "confirm_failed", "reason": res["reason"],
-                    "note": "Hold expired or slot taken. Nothing was booked."}
-        tools.release_holds(self.conn, st["cid"], keep_hold_id=chosen["hold_id"])
-        tools.record_confirmation(self.conn, res["appointment_id"], st["sid"], chosen["slot_id"], st["now"])
-        st["state"], st["offered"] = "confirmed", [chosen]
-        st["booked"] = {"appointment_id": res["appointment_id"], "slot_id": chosen["slot_id"]}
-        st["facts"] = {"times": [_hhmm(chosen["start_at"])], "docks": [chosen["dock_name"]],
-                       "options": [], "truck_regs": []}
-        st["template"] = (f"Confirmed: {_hhmm(chosen['start_at'])} at {chosen['dock_name']}. "
-                          "Please report at the gate on arrival.")
-        return {"status": "confirmed", "time": _hhmm(chosen["start_at"]), "dock": chosen["dock_name"]}
+        if ctx["desk"].state["state"] != "OFFERED":
+            return {"error": "No options have been offered in this conversation. Call offer_slots first."}
+        res = ctx["desk"].confirm(sh, int(option_number))
+        if res["action"] == "clarify":
+            return {"error": res["reply"]}
+        ctx["result"] = res
+        return {"status": res["action"], "message_for_driver": res["reply"]}
 
-    def t_get_booking_status(self, st):
-        if err := self._need_shipment(st):
+    def t_get_booking_status(self, ctx):
+        sh, err = self._sh(ctx)
+        if err:
             return err
-        appt = tools.current_appointment(self.conn, st["sid"])
-        if not appt:
-            st["template"] = "You have no slot booked right now. When will you arrive?"
-            st["facts"] = {"times": [], "docks": [], "options": [], "truck_regs": []}
-            return {"status": "no_booking"}
-        st["template"] = f"Your slot is {_hhmm(appt['start_at'])} at {appt['dock_name']}."
-        st["facts"] = {"times": [_hhmm(appt["start_at"])], "docks": [appt["dock_name"]],
-                       "options": [], "truck_regs": []}
-        return {"status": "booked", "time": _hhmm(appt["start_at"]), "dock": appt["dock_name"]}
+        on_site = tools.on_site(sh) and sh.get("queue_state") != "IN_DOCK"
+        res = ctx["desk"].handle_on_site(sh, "ask_status") if on_site else ctx["desk"].status(sh)
+        ctx["result"] = res
+        return {"status": res["action"], "message_for_driver": res["reply"]}
 
-    def t_escalate_to_ops(self, st, reason=""):
-        st["escalated"] = reason[:200]
-        if "template" not in st:
-            st["template"] = "Thanks. Our operations team will call you shortly."
-            st["facts"] = {"times": [], "docks": [], "options": [], "truck_regs": []}
+    def t_escalate_to_ops(self, ctx, reason=""):
+        sh, err = self._sh(ctx)
+        if err:
+            return err
+        ctx["result"] = ctx["desk"].escalate(sh, (reason or "Agent requested a human")[:200])
         return {"status": "escalated"}
 
-    ACTION = {"already_arrived": "already_arrived", "offered": "offered", "no_slots": "escalate",
-              "confirmed": "confirmed", "confirm_failed": "confirm_failed", "escalated": "escalate",
-              "booked": "status", "no_booking": "status", "eta_recorded": "eta_recorded",
-              "identified": "identified"}
+    # ---------------------------------------------------------------- loop
+    def handle(self, conversation_id: str, phone: str, text: str, now: str = tu.SNAPSHOT_NOW,
+               external_message_id: str | None = None) -> dict:
+        now = tu.norm(now)
+        driver = tools.driver_for_phone(self.conn, phone)
+        if driver is None:
+            return {"action": "no_shipment", "reply": "Sorry, I can't find this number in our driver list. "
+                                                      "Please call the SetuHaul control room.", "mode": "agent",
+                    "tool_calls": []}
+        desk = Desk(self.conn, conversation_id, now)
+        desk.open(driver)
+        dup = desk.find_duplicate(text, external_message_id)
+        if dup:
+            desk.log("DRIVER", text, "DUPLICATE", external_id=external_message_id, duplicate=True)
+            reply = f"Got it, this repeats your message from {tu.hhmm(dup['message_ts'])}. I'm already working on it."
+            desk.log("AGENT", reply, "DUPLICATE")
+            return {"action": "duplicate", "reply": reply, "mode": "agent", "reply_source": "template", "tool_calls": []}
 
-    # -- main loop ----------------------------------------------------------
-    def handle(self, conversation_id: str, phone: str, text: str, now: str) -> dict:
-        cands = tools.find_shipments_by_phone(self.conn, phone)
-        if not cands:
-            reply = ("Sorry, I can't find an active shipment for this number. "
-                     "Please call the SetuHaul control room.")
-            self._log(conversation_id, "in", text, now)
-            self._log(conversation_id, "out", reply, now, "no_shipment")
-            return {"reply": reply, "action": "no_shipment", "mode": "agent", "tool_calls": []}
+        history = desk.history()
+        desk.log("DRIVER", text, None, external_id=external_message_id)
+        cands = tools.shipments_for_driver(self.conn, driver["driver_id"])
+        if not desk.state["shipment_id"]:
+            if not cands:                       # cancelled / nothing open: same answer as the workflow
+                _, res = desk.identify(text, False)
+                desk.save()
+                desk.log("AGENT", res["reply"], res["action"].upper())
+                return {**res, "mode": "agent", "reply_source": "template", "tool_calls": []}
+            # same identity rule as the workflow (one open, named, or the only trip underway)
+            sh, _ = tools.resolve_shipment(cands, text, any(w in text.lower() for w in ("late", "delay", "der")))
+            if sh:
+                desk.state["shipment_id"] = sh["shipment_id"]
+                desk.set_thread(shipment_id=sh["shipment_id"])
 
-        conv = self._load(conversation_id)
-        sid = conv["shipment_id"] or (cands[0]["id"] if len(cands) == 1 else None)
-        st = {"cid": conversation_id, "phone": phone, "now": now, "sid": sid, "candidates": cands,
-              "state": conv["state"], "offered": json.loads(conv["offered_json"]), "eta": None}
-        history = self._history(conversation_id)
-        st["driver_texts"] = [m["content"] for m in history if m["role"] == "user"] + [text]
-        self._log(conversation_id, "in", text, now)
+        ctx = {"desk": desk, "candidates": cands, "text": text,
+               "driver_texts": [m["content"] for m in history if m["role"] == "user"] + [text]}
 
-        def context():
-            sh = tools.get_shipment(self.conn, st["sid"]) if st["sid"] else None
-            appt = tools.current_appointment(self.conn, st["sid"]) if st["sid"] else None
-            eta = tools.current_eta(self.conn, st["sid"]) if st["sid"] else None
-            return json.dumps({
-                "current_time": now,
-                "trucks_on_this_phone": [c["reg_no"] for c in cands],
-                "identified_truck": sh["reg_no"] if sh else None,
-                "planned_eta": _hhmm(eta["eta"]) if eta else None,
-                "current_booking": f"{_hhmm(appt['start_at'])} at {appt['dock_name']}" if appt else None,
-                "conversation_state": st["state"],
-                "options_offered": [f"{i}. {_hhmm(o['start_at'])} - {o['dock_name']}"
-                                    for i, o in enumerate(st["offered"], 1)] if st["state"] == "offered" else [],
-            })
+        def facts():
+            sh = tools.get_shipment(self.conn, desk.state["shipment_id"]) if desk.state["shipment_id"] else None
+            appt = tools.current_appointment(self.conn, sh["shipment_id"]) if sh else None
+            eta = tools.current_eta(self.conn, sh["shipment_id"], now) if sh else None
+            return {"current_time": tu.simple(now),
+                    "driver_orders": [f"{c['order_reference']} ({c['origin_city']}, truck {c['reg_no']})" for c in cands],
+                    "shipment_identified": sh["order_reference"] if sh else None,
+                    "current_eta": tu.hhmm(eta["eta"]) if eta else None,
+                    "current_booking": f"{tu.hhmm(appt['slot_start_ts'])} at Dock {appt['dock_code']}" if appt else None,
+                    "at_facility": bool(sh and tools.on_site(sh)),
+                    "conversation_state": desk.state["state"],
+                    "options_offered": [f"{i}. {tu.hhmm(o['start'])} - Dock {o['dock_code']}"
+                                        for i, o in enumerate(desk.state["offered"], 1)]
+                    if desk.state["state"] == "OFFERED" else []}
 
+        known = facts()
         messages = [{"role": "system", "content": AGENT_PROMPT},
-                    {"role": "system", "content": "Facts from the backend: " + context()},
+                    {"role": "system", "content": "Facts from the backend: " + json.dumps(known)},
                     *history, {"role": "user", "content": text}]
-        trace, last_status, reply = [], None, None
+        trace, reply = [], None
         try:
             for _ in range(MAX_STEPS):
                 msg = self.llm.chat_tools(messages, TOOLS)
@@ -324,64 +273,50 @@ class AgentService:
                         args = {}
                     fn = getattr(self, "t_" + name, None)
                     try:
-                        out = fn(st, **args) if fn else {"error": f"unknown tool {name}"}
+                        out = fn(ctx, **args) if fn else {"error": f"unknown tool {name}"}
                     except TypeError as e:
                         out = {"error": f"bad arguments: {e}"}
-                    trace.append({"tool": name, "args": args, "result": out})
-                    if "status" in out:
-                        last_status = out["status"]
-                    messages.append({"role": "tool", "tool_call_id": call.get("id", name),
-                                     "content": json.dumps(out)})
-            else:   # step limit hit
-                last_status = "escalated"
-                st["template"] = "Thanks. Our operations team will call you shortly."
-                st["facts"] = {"times": [], "docks": [], "options": [], "truck_regs": []}
+                    trace.append({"tool": name, "args": args,
+                                  "result": {k: v for k, v in out.items() if k != "message_for_driver"}})
+                    messages.append({"role": "tool", "tool_call_id": call.get("id", name), "content": json.dumps(out)})
+            else:                                    # step limit hit
+                sh, _ = self._sh(ctx)
+                ctx["result"] = desk.escalate(sh, "Agent exceeded its step limit") if sh else \
+                    desk.result("escalate", "Thanks. Our operations team will call you shortly.")
                 reply = None
-        except Exception as e:      # LLM down: never leave the driver without an answer
+        except Exception as e:                       # LLM down: never leave the driver without an answer
             trace.append({"tool": "llm_error", "args": {}, "result": {"error": type(e).__name__}})
-            if "template" not in st:
-                st["template"] = "Sorry, I couldn't process that. Our operations team will call you shortly."
-                st["facts"] = {"times": [], "docks": [], "options": [], "truck_regs": []}
-                last_status = last_status or "escalated"
+            if "result" not in ctx:
+                sh, _ = self._sh(ctx)
+                ctx["result"] = desk.escalate(sh, "Assistant unavailable") if sh else \
+                    desk.result("escalate", "Sorry, I couldn't process that. Our operations team will call you shortly.")
+            reply = None
 
-        if last_status in self.ACTION:
-            action = self.ACTION[last_status]
-        elif st["sid"] is None and len(cands) > 1:
-            action = "ask_vehicle"
-        elif st["state"] == "offered":
-            action = "clarify"
-        else:
-            action = "ask_eta"
-
-        # Fact check: the LLM reply must carry exactly what the tools returned
-        source, check_note = "llm", "ok"
-        ctx = json.loads(context())
-        ctx_times = [t for t in (ctx["planned_eta"], (ctx["current_booking"] or "").split(" at ")[0],
-                                 _hhmm(st["eta"]) if st.get("eta") else None) if t]
-        if "facts" in st:
-            st["facts"].setdefault("allowed_times", [])
-            st["facts"]["allowed_times"] = st["facts"]["allowed_times"] + ctx_times
-        if "template" in st:
-            ok, check_note = (check(reply, st["facts"]) if reply else (False, "no reply"))
-            if not ok:
-                reply, source = st["template"], "template"
-        elif reply:
-            ok, check_note = check(reply, {"times": [], "allowed_times": ctx_times, "docks": [],
-                                           "options": [], "truck_regs": []})
-            if not ok:   # LLM mentioned a time no tool returned
-                reply, source = ("Thanks. Roughly how late are you, or what time will you reach?"
-                                 if action == "ask_eta" else "Thanks. Our operations team will call you shortly."), "template"
-        else:
-            reply, source = "Thanks. Roughly how late are you, or what time will you reach?", "template"
-
-        self._save(st, now)
-        self._log(conversation_id, "out", reply, now, action)
-        result = {"reply": reply, "action": action, "mode": "agent", "reply_source": source,
-                  "phrase_check": check_note, "tool_calls": trace}
-        if st.get("eta"):
-            result["eta"] = st["eta"]
-        if action == "offered":
-            result["options"] = st["offered"]
-        if action == "confirmed":
-            result.update(st["booked"])
-        return result
+        res = ctx.get("result")
+        if res is None:                              # the model only talked
+            if not desk.state["shipment_id"] and len(cands) > 1:
+                desk.facts = {**EMPTY_FACTS, "orders": [c["order_reference"] for c in cands]}
+                res = desk.result("ask_shipment", "Which shipment is this about? "
+                                  + ", ".join(c["order_reference"] for c in cands) + ".")
+                desk.set_thread("WAITING_FOR_DRIVER")
+            elif ctx.get("eta"):
+                desk.facts = {**EMPTY_FACTS, "times": [tu.hhmm(ctx["eta"])]}
+                res = desk.result("eta_recorded", f"Noted, new ETA {tu.hhmm(ctx['eta'])}.")
+            elif desk.state["state"] == "OFFERED":
+                desk.facts = dict(EMPTY_FACTS)
+                res = desk.result("clarify", "Please reply with an option number.")
+            else:
+                desk.facts = dict(EMPTY_FACTS)
+                res = desk.result("ask_eta", "Thanks. Roughly how late are you, or what time will you reach?")
+        template = res["reply"]
+        known_times = [t for t in (known["current_eta"], (known["current_booking"] or "").split(" at ")[0]) if t]
+        fx = {**desk.facts, "allowed_times": desk.facts.get("allowed_times", []) + known_times
+              + [tu.hhmm(t) for t in (ctx.get("eta"),) if t]}
+        ok, note = check(reply, fx) if reply else (False, "no reply")
+        res = {**res, "reply": reply if ok else template, "reply_source": "llm" if ok else "template",
+               "phrase_check": note, "template_reply": template, "mode": "agent", "tool_calls": trace}
+        if ctx.get("eta"):
+            res.setdefault("eta", ctx["eta"])
+        desk.save()
+        desk.log("AGENT", res["reply"], res["action"].upper(), review=desk.review)
+        return res

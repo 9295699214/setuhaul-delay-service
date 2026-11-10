@@ -24,6 +24,7 @@ Hard rules:
 Return only the reply text."""
 
 TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\s?(?:AM|PM)\b", re.I)
+ORDER_RE = re.compile(r"\bORD-\d{6}-\d{3}\b")
 ANY_CLOCK_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
 OPTION_RE = re.compile(r"^\s*(\d)\.", re.M)
 
@@ -65,10 +66,13 @@ def check(reply: str, facts: dict) -> tuple[bool, str]:
     for r in facts["truck_regs"]:
         if r not in reply:
             return False, f"missing truck {r}"
+    for o in facts.get("orders", []):
+        if o not in reply:
+            return False, f"missing order {o}"
     return True, "ok"
 
 
-def phrase(llm, driver_text: str, result: dict) -> dict:
+def phrase(llm, driver_text: str, result: dict, facts: dict | None = None) -> dict:
     """Rewrite result['reply'] with the LLM if it passes the check."""
     template = result["reply"]
     result["template_reply"] = template
@@ -81,7 +85,7 @@ def phrase(llm, driver_text: str, result: dict) -> dict:
     except Exception as e:                       # network, quota, timeout
         result["phrase_check"] = f"llm error: {type(e).__name__}"
         return result
-    ok, reason = check(draft, facts_from(result, template))
+    ok, reason = check(draft, facts if facts is not None else facts_from(result, template))
     result["phrase_check"] = reason
     if ok:
         result["reply"] = draft

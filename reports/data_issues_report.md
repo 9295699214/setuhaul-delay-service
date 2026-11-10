@@ -1,320 +1,468 @@
 # Data issues report
 
-15 checks run, **15 found problems**. Each check is a query in `analysis/data_issues.sql`; the rows below are the evidence.
+23 checks run against the supplied snapshot (4 Aug 2026), **18 found problems**. Each check is a query in `analysis/data_issues.sql`; the rows below are the evidence. Checks with no rows are guards that pass on this snapshot.
 
 | # | Check | Rows |
 |---|---|---|
-| 1 | Overlapping slots on the same dock | 2 |
-| 2 | Two active bookings at the same time on one dock | 1 |
-| 3 | Active booking inside a blocked window | 1 |
-| 4 | Shipment booked on an incompatible dock | 1 |
-| 5 | Booking at a different facility from the shipment's destination | 1 |
-| 6 | Active booking for a cancelled or delivered shipment | 1 |
-| 7 | Current ETA is after the booked slot has ended | 2 |
-| 8 | ETA sources disagree by more than 60 minutes | 3 |
-| 9 | Slot that ends before it starts | 1 |
-| 10 | Unload time longer than the booked slot | 1 |
-| 11 | Booking on an inactive dock | 1 |
-| 12 | Truck at the gate with no active appointment | 1 |
-| 13 | One phone number linked to more than one driver | 1 |
-| 14 | Open shipment with no ETA from any source | 1 |
-| 15 | Driver's last confirmation points to a slot that is no longer booked | 1 |
+| 1 | Confirmed booking during a dock breakdown | 1 |
+| 2 | Slot still OPEN although a dock event covers it | 1 |
+| 3 | Active booking heavier than the dock allows | 2 |
+| 4 | Unload takes longer than the booked slot | 4 |
+| 5 | Latest ETA is after the booked slot starts (truck not yet at the gate) | 4 |
+| 6 | Vehicle booked for a new trip while it is still busy on the previous one | 3 |
+| 7 | One driver on two moving trucks at once | 1 |
+| 8 | Driver with more than one open shipment | 4 |
+| 9 | latest_eta_ts changed with no ETA update behind it | 4 |
+| 10 | Booking resting on a low-confidence ETA | 2 |
+| 11 | Duplicate driver message left as an open thread | 1 |
+| 12 | Operational message not delivered | 2 |
+| 13 | Warehouse confirmation still pending | 2 |
+| 14 | No-show with nothing done afterwards | 1 |
+| 15 | Facility contact without an email | 1 |
+| 16 | Truck in dock running into the next booking | 1 |
+| 17 | Truck waiting in the yard for a dock that is broken | 1 |
+| 18 | The snapshot is not one moment in time | 10 |
+| 19 | Booking at a facility other than the shipment's destination | 0 |
+| 20 | Load type and dock type mismatch | 0 |
+| 21 | Load over vehicle capacity, or reefer load on a non-reefer truck | 0 |
+| 22 | Load over 25 t not marked heavy (RULE004) | 0 |
+| 23 | Timestamps not in +05:30 | 0 |
 
-## 1. Overlapping slots on the same dock
+## 1. Confirmed booking during a dock breakdown
 
-Why it matters: the "one active booking per slot" index cannot see two different slots covering the same time.
+Why it matters: SHP1005 is told to unload at D3 09:00-10:00 while the leveller is broken from 09:15.
 
-| slot_a | slot_b | dock_id | a_start | a_end | b_start | b_end |
+| appointment_id | shipment_id | slot_id | slot_status | slot_start | slot_end | dock_event_id | event_type | event_start | event_end |
+|---|---|---|---|---|---|---|---|---|---|
+| APT1005 | SHP1005 | SLOT-JAI-030 | OPEN | 09:00 | 10:00 | DEVT001 | BREAKDOWN | 09:15 | 13:00 |
+
+<details><summary>Query</summary>
+
+```sql
+SELECT a.appointment_id, a.shipment_id, sl.slot_id, sl.slot_status,
+       substr(sl.slot_start_ts,12,5) AS slot_start, substr(sl.slot_end_ts,12,5) AS slot_end,
+       e.dock_event_id, e.event_type, substr(e.event_start_ts,12,5) AS event_start, substr(e.event_end_ts,12,5) AS event_end
+FROM appointments a
+JOIN appointment_slots sl ON sl.slot_id = a.slot_id
+JOIN dock_status_events e ON e.dock_id = sl.dock_id
+WHERE a.appointment_status IN ('PENDING_CONFIRMATION','CONFIRMED','IN_PROGRESS')
+  AND e.event_type IN ('BREAKDOWN','MAINTENANCE','MANUAL_BLOCK')
+  AND e.event_start_ts < sl.slot_end_ts AND COALESCE(e.event_end_ts,'9999') > sl.slot_start_ts
+```
+
+</details>
+
+## 2. Slot still OPEN although a dock event covers it
+
+Why it matters: slot_status and dock_status_events disagree, so v_slot_availability can offer a broken dock.
+
+| slot_id | dock_id | slot_status | slot_start | dock_event_id | event_type | reason |
 |---|---|---|---|---|---|---|
-| JAI-D1-10 | JAI-D1-1030 | JAI-D1 | 2026-08-04 10:00 | 2026-08-04 11:00 | 2026-08-04 10:30 | 2026-08-04 11:30 |
-| JAI-D1-1030 | JAI-D1-11 | JAI-D1 | 2026-08-04 10:30 | 2026-08-04 11:30 | 2026-08-04 11:00 | 2026-08-04 12:00 |
+| SLOT-JAI-030 | DOCK-JAI-D3 | OPEN | 09:00 | DEVT001 | BREAKDOWN | Hydraulic dock leveller failure |
 
 <details><summary>Query</summary>
 
 ```sql
-SELECT a.id AS slot_a, b.id AS slot_b, a.dock_id, a.start_at AS a_start, a.end_at AS a_end,
-       b.start_at AS b_start, b.end_at AS b_end
-FROM slots a JOIN slots b
-  ON a.dock_id = b.dock_id AND a.id < b.id
- AND a.start_at < b.end_at AND b.start_at < a.end_at
- AND a.end_at > a.start_at AND b.end_at > b.start_at
+SELECT sl.slot_id, sl.dock_id, sl.slot_status, substr(sl.slot_start_ts,12,5) AS slot_start,
+       e.dock_event_id, e.event_type, e.reason
+FROM appointment_slots sl
+JOIN dock_status_events e ON e.dock_id = sl.dock_id
+WHERE sl.slot_status = 'OPEN'
+  AND e.event_type IN ('BREAKDOWN','MAINTENANCE','MANUAL_BLOCK')
+  AND e.event_start_ts < sl.slot_end_ts AND COALESCE(e.event_end_ts,'9999') > sl.slot_start_ts
 ```
 
 </details>
 
-## 2. Two active bookings at the same time on one dock
+## 3. Active booking heavier than the dock allows
 
-Why it matters: a physical double booking that passes both unique indexes.
+Why it matters: the dock cannot physically take the vehicle; the booking will fail at the gate.
 
-| dock_id | shipment_a | a_start | shipment_b | b_start |
-|---|---|---|---|---|
-| JAI-D1 | SH-01 | 2026-08-04 10:00 | SH-07 | 2026-08-04 10:30 |
-
-<details><summary>Query</summary>
-
-```sql
-SELECT s1.dock_id, a1.shipment_id AS shipment_a, s1.start_at AS a_start,
-       a2.shipment_id AS shipment_b, s2.start_at AS b_start
-FROM appointments a1 JOIN slots s1 ON s1.id = a1.slot_id
-JOIN appointments a2 ON a2.id > a1.id AND a2.status = 'active'
-JOIN slots s2 ON s2.id = a2.slot_id AND s2.dock_id = s1.dock_id
-WHERE a1.status = 'active' AND s1.start_at < s2.end_at AND s2.start_at < s1.end_at
-```
-
-</details>
-
-## 3. Active booking inside a blocked window
-
-Why it matters: the truck is told to unload at a dock that is under maintenance.
-
-| shipment_id | dock_id | start_at | end_at | reason | block_start | block_end |
-|---|---|---|---|---|---|---|
-| SH-08 | JAI-D2 | 2026-08-04 14:00 | 2026-08-04 15:00 | maintenance | 2026-08-04 14:00 | 2026-08-04 16:00 |
-
-<details><summary>Query</summary>
-
-```sql
-SELECT a.shipment_id, s.dock_id, s.start_at, s.end_at, b.reason, b.start_at AS block_start, b.end_at AS block_end
-FROM appointments a JOIN slots s ON s.id = a.slot_id
-JOIN dock_blocks b ON b.dock_id = s.dock_id AND b.start_at < s.end_at AND s.start_at < b.end_at
-WHERE a.status = 'active'
-```
-
-</details>
-
-## 4. Shipment booked on an incompatible dock
-
-Why it matters: a reefer load at a dry dock spoils; an overweight load cannot be handled.
-
-| shipment_id | dock | needs_reefer | supports_reefer | load_weight_kg | max_weight_kg |
+| appointment_id | shipment_id | appointment_status | load_weight_kg | dock_code | max_vehicle_weight_kg |
 |---|---|---|---|---|---|
-| SH-09 | JAI-D1 | 1 | 0 | 8000 | 20000 |
+| APT1014A | SHP1014 | PENDING_CONFIRMATION | 21000 | D1 | 20000 |
+| APT1005 | SHP1005 | CONFIRMED | 20500 | D3 | 20000 |
 
 <details><summary>Query</summary>
 
 ```sql
-SELECT a.shipment_id, d.id AS dock, sh.needs_reefer, d.supports_reefer, sh.load_weight_kg, d.max_weight_kg
-FROM appointments a JOIN shipments sh ON sh.id = a.shipment_id
-JOIN slots s ON s.id = a.slot_id JOIN docks d ON d.id = s.dock_id
-WHERE a.status = 'active'
-  AND ((sh.needs_reefer = 1 AND d.supports_reefer = 0) OR sh.load_weight_kg > d.max_weight_kg)
+SELECT a.appointment_id, a.shipment_id, a.appointment_status, s.load_weight_kg, d.dock_code, d.max_vehicle_weight_kg
+FROM appointments a
+JOIN shipments s ON s.shipment_id = a.shipment_id
+JOIN appointment_slots sl ON sl.slot_id = a.slot_id
+JOIN docks d ON d.dock_id = sl.dock_id
+WHERE a.appointment_status IN ('PENDING_CONFIRMATION','CONFIRMED','IN_PROGRESS')
+  AND s.load_weight_kg > d.max_vehicle_weight_kg
 ```
 
 </details>
 
-## 5. Booking at a different facility from the shipment's destination
+## 4. Unload takes longer than the booked slot
 
-Why it matters: the truck would drive to the wrong city.
+Why it matters: the truck overruns into the next booking on that dock (SHP1002 already has).
 
-| shipment_id | shipment_facility | dock_facility | slot |
+| appointment_id | shipment_id | expected_unload_min | slot_minutes |
 |---|---|---|---|
-| SH-10 | AMD-WH | JAI-DC | JAI-D1-16 |
+| APT1014A | SHP1014 | 75 | 60 |
+| APT1002 | SHP1002 | 70 | 60 |
+| APT1005 | SHP1005 | 75 | 60 |
+| APT1009 | SHP1009 | 75 | 60 |
 
 <details><summary>Query</summary>
 
 ```sql
-SELECT a.shipment_id, sh.facility_id AS shipment_facility, d.facility_id AS dock_facility, s.id AS slot
-FROM appointments a JOIN shipments sh ON sh.id = a.shipment_id
-JOIN slots s ON s.id = a.slot_id JOIN docks d ON d.id = s.dock_id
-WHERE a.status = 'active' AND sh.facility_id != d.facility_id
+SELECT a.appointment_id, a.shipment_id, s.expected_unload_min,
+       CAST(ROUND((julianday(sl.slot_end_ts) - julianday(sl.slot_start_ts)) * 1440) AS INTEGER) AS slot_minutes
+FROM appointments a
+JOIN shipments s ON s.shipment_id = a.shipment_id
+JOIN appointment_slots sl ON sl.slot_id = a.slot_id
+WHERE a.appointment_status IN ('PENDING_CONFIRMATION','CONFIRMED','IN_PROGRESS')
+  AND s.expected_unload_min > ROUND((julianday(sl.slot_end_ts) - julianday(sl.slot_start_ts)) * 1440)
 ```
 
 </details>
 
-## 6. Active booking for a cancelled or delivered shipment
+## 5. Latest ETA is after the booked slot starts (truck not yet at the gate)
 
-Why it matters: dead bookings hide capacity that late drivers need.
+Why it matters: the booking is already broken; these drivers need a new slot before they arrive.
 
-| shipment_id | status | slot_id |
+| appointment_id | shipment_id | appointment_status | eta | eta_confidence | slot_start | slot_end |
+|---|---|---|---|---|---|---|
+| APT1006 | SHP1006 | CONFIRMED | 11:20 | HIGH | 10:00 | 11:00 |
+| APT1014A | SHP1014 | PENDING_CONFIRMATION | 11:25 | HIGH | 11:00 | 12:00 |
+| APT1015A | SHP1015 | CONFIRMED | 18:30 | HIGH | 17:00 | 18:00 |
+| APT1017 | SHP1017 | CONFIRMED | 12:45 | LOW | 12:00 | 13:00 |
+
+<details><summary>Query</summary>
+
+```sql
+SELECT a.appointment_id, a.shipment_id, a.appointment_status, substr(le.effective_eta_ts,12,5) AS eta,
+       le.eta_confidence, substr(sl.slot_start_ts,12,5) AS slot_start, substr(sl.slot_end_ts,12,5) AS slot_end
+FROM appointments a
+JOIN v_latest_eta le ON le.shipment_id = a.shipment_id
+JOIN appointment_slots sl ON sl.slot_id = a.slot_id
+LEFT JOIN facility_checkins fc ON fc.shipment_id = a.shipment_id
+WHERE a.appointment_status IN ('PENDING_CONFIRMATION','CONFIRMED')
+  AND fc.gate_in_ts IS NULL
+  AND le.effective_eta_ts > sl.slot_start_ts
+```
+
+</details>
+
+## 6. Vehicle booked for a new trip while it is still busy on the previous one
+
+Why it matters: the next trip departs from another city before the truck has left Jaipur.
+
+| vehicle_id | busy_shipment | busy_status | busy_until | next_shipment | next_status | next_departs | next_from |
+|---|---|---|---|---|---|---|---|
+| VEH001 | SHP1001 | COMPLETED | 08:50 | SHP1017 | IN_TRANSIT | 08:00 | Neemrana |
+| VEH003 | SHP1003 | WAITING | 09:05 | SHP1018 | ASSIGNED | 08:00 | Bhiwadi |
+| VEH015 | SHP1006 | IN_TRANSIT | 12:05 | SHP1021 | ASSIGNED | 10:00 | Noida |
+
+<details><summary>Query</summary>
+
+```sql
+SELECT s1.vehicle_id, s1.shipment_id AS busy_shipment, s1.current_status AS busy_status,
+       strftime('%H:%M', COALESCE(julianday(fc.gate_out_ts), julianday(le.effective_eta_ts) + s1.expected_unload_min/1440.0) + 5.5/24) AS busy_until,
+       s2.shipment_id AS next_shipment, s2.current_status AS next_status,
+       substr(s2.planned_departure_ts,12,5) AS next_departs, s2.origin_city AS next_from
+FROM shipments s1
+JOIN shipments s2 ON s2.vehicle_id = s1.vehicle_id AND s2.shipment_id > s1.shipment_id
+JOIN v_latest_eta le ON le.shipment_id = s1.shipment_id
+LEFT JOIN facility_checkins fc ON fc.shipment_id = s1.shipment_id
+WHERE s1.current_status <> 'CANCELLED' AND s2.current_status <> 'CANCELLED'
+  AND julianday(s2.planned_departure_ts) < COALESCE(julianday(fc.gate_out_ts), julianday(le.effective_eta_ts) + s1.expected_unload_min/1440.0)
+```
+
+</details>
+
+## 7. One driver on two moving trucks at once
+
+Why it matters: physically impossible; one of the two ETAs (and its slot) cannot be trusted.
+
+| driver_id | moving_trips | trips |
 |---|---|---|
-| SH-11 | cancelled | JAI-D2-17 |
+| DRV007 | 2 | SHP1007 on VEH008 (IN_TRANSIT) | SHP1016 on VEH007 (IN_TRANSIT) |
 
 <details><summary>Query</summary>
 
 ```sql
-SELECT a.shipment_id, sh.status, a.slot_id
-FROM appointments a JOIN shipments sh ON sh.id = a.shipment_id
-WHERE a.status = 'active' AND sh.status IN ('cancelled', 'delivered')
+SELECT driver_id, COUNT(*) AS moving_trips,
+       GROUP_CONCAT(shipment_id || ' on ' || vehicle_id || ' (' || current_status || ')', ' | ') AS trips
+FROM shipments
+WHERE current_status IN ('IN_TRANSIT','AT_GATE','WAITING','IN_DOCK')
+GROUP BY driver_id HAVING COUNT(*) > 1
 ```
 
 </details>
 
-## 7. Current ETA is after the booked slot has ended
+## 8. Driver with more than one open shipment
 
-Why it matters: the booking is already broken; the driver needs a new slot. Uses the same trust order as the service (ops override first).
+Why it matters: a message from that phone cannot be matched to one shipment without a rule or a question.
 
-| shipment_id | current_eta | source | start_at | end_at |
+| driver_id | open_shipments | shipments |
+|---|---|---|
+| DRV003 | 2 | SHP1003 WAITING, SHP1018 ASSIGNED |
+| DRV004 | 2 | SHP1004 WAITING, SHP1020 ASSIGNED |
+| DRV006 | 2 | SHP1006 IN_TRANSIT, SHP1021 ASSIGNED |
+| DRV007 | 2 | SHP1007 IN_TRANSIT, SHP1016 IN_TRANSIT |
+
+<details><summary>Query</summary>
+
+```sql
+SELECT driver_id, COUNT(*) AS open_shipments,
+       GROUP_CONCAT(shipment_id || ' ' || current_status, ', ') AS shipments
+FROM shipments
+WHERE current_status NOT IN ('COMPLETED','CANCELLED')
+GROUP BY driver_id HAVING COUNT(*) > 1
+```
+
+</details>
+
+## 9. latest_eta_ts changed with no ETA update behind it
+
+Why it matters: v_latest_eta falls back to a value nobody can trace to a source or confidence.
+
+| shipment_id | original_eta | latest_eta |
+|---|---|---|
+| SHP1002 | 07:55 | 07:58 |
+| SHP1009 | 10:45 | 10:50 |
+| SHP1010 | 10:50 | 10:55 |
+| SHP1011 | 10:40 | 10:45 |
+
+<details><summary>Query</summary>
+
+```sql
+SELECT s.shipment_id, substr(s.original_eta_ts,12,5) AS original_eta, substr(s.latest_eta_ts,12,5) AS latest_eta
+FROM shipments s
+WHERE s.latest_eta_ts <> s.original_eta_ts
+  AND NOT EXISTS (SELECT 1 FROM eta_updates e WHERE e.shipment_id = s.shipment_id)
+```
+
+</details>
+
+## 10. Booking resting on a low-confidence ETA
+
+Why it matters: "late by one hour" and "12:30 to 13:00" were turned into firm times and slots.
+
+| appointment_id | shipment_id | appointment_status | eta_source | eta_confidence | eta_note |
+|---|---|---|---|---|---|
+| APT1013A | SHP1013 | PENDING_CONFIRMATION | DRIVER_DECLARED | LOW | Driver said only: late by one hour. |
+| APT1017 | SHP1017 | CONFIRMED | DRIVER_DECLARED | LOW | Driver expects arrival between 12:30 and 13:00. |
+
+<details><summary>Query</summary>
+
+```sql
+SELECT a.appointment_id, a.shipment_id, a.appointment_status, le.eta_source, le.eta_confidence, le.eta_note
+FROM appointments a
+JOIN v_latest_eta le ON le.shipment_id = a.shipment_id
+WHERE a.appointment_status IN ('PENDING_CONFIRMATION','CONFIRMED') AND le.eta_confidence = 'LOW'
+```
+
+</details>
+
+## 11. Duplicate driver message left as an open thread
+
+Why it matters: the retry (THR009) still looks like a live request and could get a second set of slots.
+
+| thread_id | thread_status | chat_message_id | external_message_id | message_text |
 |---|---|---|---|---|
-| SH-12 | 2026-08-04 09:40 | driver | 2026-08-04 08:00 | 2026-08-04 09:00 |
-| SH-19 | 2026-08-04 14:20 | driver | 2026-08-04 12:00 | 2026-08-04 13:00 |
+| THR009 | OPEN | MSG015 | wa-9009 | Traffic after Shahpura. Reaching around 11:20. Any slot after 12? |
 
 <details><summary>Query</summary>
 
 ```sql
-WITH ranked AS (
-  SELECT shipment_id, eta, source,
-         ROW_NUMBER() OVER (PARTITION BY shipment_id
-                            ORDER BY (source = 'ops_override') DESC, created_at DESC, id DESC) rn
-  FROM eta_updates)
-SELECT a.shipment_id, r.eta AS current_eta, r.source, s.start_at, s.end_at
-FROM appointments a JOIN slots s ON s.id = a.slot_id
-JOIN ranked r ON r.shipment_id = a.shipment_id AND r.rn = 1
-WHERE a.status = 'active' AND r.eta >= s.end_at
+SELECT t.thread_id, t.thread_status, m.chat_message_id, m.external_message_id, m.message_text
+FROM chat_messages m JOIN chat_threads t ON t.thread_id = m.thread_id
+WHERE m.is_duplicate = 1 AND t.thread_status NOT IN ('CLOSED','RESOLVED')
 ```
 
 </details>
 
-## 8. ETA sources disagree by more than 60 minutes
+## 12. Operational message not delivered
 
-Why it matters: the system must pick one source to trust, and should say which.
+Why it matters: SHP1015's escalation FAILED, to an address that is not a facility contact; the thread says ESCALATED but nobody was told.
 
-| shipment_id | earliest_eta | latest_eta | sources |
+| operational_message_id | shipment_id | recipient_address | delivery_status | is_known_contact | threads |
+|---|---|---|---|---|---|
+| OM002 | SHP1013 | neha.bansal@setuhaul.example | QUEUED | 1 | THR003:WAITING_FOR_DRIVER |
+| OM004 | SHP1015 | night.shift@setuhaul.example | FAILED | 0 | THR005:ESCALATED |
+
+<details><summary>Query</summary>
+
+```sql
+SELECT o.operational_message_id, o.shipment_id, o.recipient_address, o.delivery_status,
+       (SELECT COUNT(*) FROM facility_contacts fc WHERE fc.email = o.recipient_address) AS is_known_contact,
+       (SELECT GROUP_CONCAT(t.thread_id || ':' || t.thread_status) FROM chat_threads t WHERE t.shipment_id = o.shipment_id) AS threads
+FROM operational_messages o
+WHERE o.delivery_status IN ('FAILED','QUEUED')
+```
+
+</details>
+
+## 13. Warehouse confirmation still pending
+
+Why it matters: the slot is locked by a pending booking that may never be confirmed; it needs an expiry.
+
+| appointment_id | shipment_id | slot_id | booked_at | confirmation_request |
+|---|---|---|---|---|
+| APT1013A | SHP1013 | SLOT-JAI-018 | 09:32 | OM002:QUEUED |
+| APT1014A | SHP1014 | SLOT-JAI-004 | 09:52 | OM001:SENT |
+
+<details><summary>Query</summary>
+
+```sql
+SELECT a.appointment_id, a.shipment_id, a.slot_id, substr(a.booked_at,12,5) AS booked_at,
+       (SELECT GROUP_CONCAT(o.operational_message_id || ':' || o.delivery_status) FROM operational_messages o
+        WHERE o.appointment_id = a.appointment_id) AS confirmation_request
+FROM appointments a WHERE a.appointment_status = 'PENDING_CONFIRMATION'
+```
+
+</details>
+
+## 14. No-show with nothing done afterwards
+
+Why it matters: SHP1018 missed its slot, never departed and has no new booking, yet is still ASSIGNED.
+
+| appointment_id | shipment_id | current_status | actual_departure_ts |
 |---|---|---|---|
-| SH-02 | 2026-08-04 11:00 | 2026-08-04 12:30 | plan=11:00 | ops_override=11:30 | driver=12:30 |
-| SH-12 | 2026-08-04 08:00 | 2026-08-04 09:40 | plan=08:00 | driver=09:40 |
-| SH-19 | 2026-08-04 12:00 | 2026-08-04 14:20 | plan=12:00 | driver=14:20 |
+| APT1018 | SHP1018 | ASSIGNED |  |
 
 <details><summary>Query</summary>
 
 ```sql
-SELECT shipment_id, MIN(eta) AS earliest_eta, MAX(eta) AS latest_eta,
-       GROUP_CONCAT(source || '=' || substr(eta, 12), ' | ') AS sources
-FROM eta_updates GROUP BY shipment_id
-HAVING ROUND((julianday(MAX(eta)) - julianday(MIN(eta))) * 1440) > 60
+SELECT a.appointment_id, a.shipment_id, s.current_status, s.actual_departure_ts
+FROM appointments a JOIN shipments s ON s.shipment_id = a.shipment_id
+WHERE a.appointment_status = 'NO_SHOW' AND s.current_status NOT IN ('CANCELLED','COMPLETED')
+  AND NOT EXISTS (SELECT 1 FROM appointments b WHERE b.shipment_id = a.shipment_id
+                  AND b.appointment_status IN ('PENDING_CONFIRMATION','CONFIRMED','IN_PROGRESS'))
 ```
 
 </details>
 
-## 9. Slot that ends before it starts
+## 15. Facility contact without an email
 
-Why it matters: impossible window; must never be offered.
+Why it matters: escalations to Gurugram's night shift have no email route.
 
-| id | dock_id | start_at | end_at |
+| contact_id | facility_id | contact_role | contact_name | email | phone |
+|---|---|---|---|---|---|
+| CON005 | FAC-GGN-01 | NIGHT_SHIFT_COORDINATOR | Vacant Position |  | +91-124-5001209 |
+
+<details><summary>Query</summary>
+
+```sql
+SELECT contact_id, facility_id, contact_role, contact_name, email, phone
+FROM facility_contacts WHERE email IS NULL OR email = ''
+```
+
+</details>
+
+## 16. Truck in dock running into the next booking
+
+Why it matters: SHP1002's 70-minute unload on D2 started 08:08 and runs to 09:18, over SHP1004's 09:00 slot.
+
+| shipment_id | dock_code | unload_started | expected_unload_min | expected_end | next_shipment | next_slot_start |
+|---|---|---|---|---|---|---|
+| SHP1002 | D2 | 08:08 | 70 | 09:18 | SHP1004 | 09:00 |
+
+<details><summary>Query</summary>
+
+```sql
+SELECT fc.shipment_id, d.dock_code, substr(fc.unload_start_ts,12,5) AS unload_started, s.expected_unload_min,
+       strftime('%H:%M', julianday(fc.unload_start_ts) + s.expected_unload_min/1440.0 + 5.5/24) AS expected_end,
+       a2.shipment_id AS next_shipment, substr(sl2.slot_start_ts,12,5) AS next_slot_start
+FROM facility_checkins fc
+JOIN shipments s ON s.shipment_id = fc.shipment_id
+JOIN docks d ON d.dock_id = fc.actual_dock_id
+JOIN appointment_slots sl2 ON sl2.dock_id = fc.actual_dock_id
+JOIN appointments a2 ON a2.slot_id = sl2.slot_id AND a2.shipment_id <> fc.shipment_id
+     AND a2.appointment_status IN ('PENDING_CONFIRMATION','CONFIRMED','IN_PROGRESS')
+WHERE fc.queue_state = 'IN_DOCK' AND fc.unload_end_ts IS NULL
+  AND sl2.slot_start_ts > fc.unload_start_ts
+  AND julianday(fc.unload_start_ts) + s.expected_unload_min/1440.0 > julianday(sl2.slot_start_ts)
+```
+
+</details>
+
+## 17. Truck waiting in the yard for a dock that is broken
+
+Why it matters: SHP1005 is at the gate with a booking it can never use; it needs re-slotting now.
+
+| shipment_id | queue_state | slot_id | dock_code | event_type | reason |
+|---|---|---|---|---|---|
+| SHP1005 | WAITING_DOCK_UNAVAILABLE | SLOT-JAI-030 | D3 | BREAKDOWN | Hydraulic dock leveller failure |
+
+<details><summary>Query</summary>
+
+```sql
+SELECT fc.shipment_id, fc.queue_state, sl.slot_id, d.dock_code, e.event_type, e.reason
+FROM facility_checkins fc
+JOIN appointments a ON a.shipment_id = fc.shipment_id AND a.is_current = 1
+JOIN appointment_slots sl ON sl.slot_id = a.slot_id
+JOIN docks d ON d.dock_id = sl.dock_id
+JOIN dock_status_events e ON e.dock_id = sl.dock_id AND e.event_type IN ('BREAKDOWN','MAINTENANCE')
+     AND e.event_start_ts < sl.slot_end_ts AND COALESCE(e.event_end_ts,'9999') > sl.slot_start_ts
+WHERE fc.gate_out_ts IS NULL
+```
+
+</details>
+
+## 18. The snapshot is not one moment in time
+
+Why it matters: records run to 16:30 while 10 trucks are still "in transit" with morning ETAs; "now" must be chosen per question.
+
+| latest_record | shipment_id | current_status | eta |
 |---|---|---|---|
-| AMD-A2-BAD | AMD-A2 | 2026-08-04 12:00 | 2026-08-04 11:00 |
+| 2026-08-04T16:30:00+05:30 | SHP1006 | IN_TRANSIT | 11:20 |
+| 2026-08-04T16:30:00+05:30 | SHP1007 | IN_TRANSIT | 09:50 |
+| 2026-08-04T16:30:00+05:30 | SHP1009 | IN_TRANSIT | 10:50 |
+| 2026-08-04T16:30:00+05:30 | SHP1010 | IN_TRANSIT | 10:55 |
+| 2026-08-04T16:30:00+05:30 | SHP1011 | IN_TRANSIT | 10:45 |
+| 2026-08-04T16:30:00+05:30 | SHP1012 | IN_TRANSIT | 11:10 |
+| 2026-08-04T16:30:00+05:30 | SHP1013 | IN_TRANSIT | 11:00 |
+| 2026-08-04T16:30:00+05:30 | SHP1014 | IN_TRANSIT | 11:25 |
+| 2026-08-04T16:30:00+05:30 | SHP1016 | IN_TRANSIT | 12:00 |
+| 2026-08-04T16:30:00+05:30 | SHP1017 | IN_TRANSIT | 12:45 |
 
 <details><summary>Query</summary>
 
 ```sql
-SELECT id, dock_id, start_at, end_at FROM slots WHERE end_at <= start_at
+SELECT (SELECT MAX(updated_at) FROM shipments) AS latest_record, s.shipment_id, s.current_status,
+       substr(le.effective_eta_ts,12,5) AS eta
+FROM shipments s JOIN v_latest_eta le ON le.shipment_id = s.shipment_id
+WHERE s.current_status = 'IN_TRANSIT'
+  AND le.effective_eta_ts < (SELECT MAX(updated_at) FROM shipments)
+  AND NOT EXISTS (SELECT 1 FROM facility_checkins fc WHERE fc.shipment_id = s.shipment_id)
 ```
 
 </details>
 
-## 10. Unload time longer than the booked slot
+## 19. Booking at a facility other than the shipment's destination
 
-Why it matters: the truck overruns into the next booking on that dock.
+Why it matters: guards the multi-facility model; clean in this snapshot.
 
-| shipment_id | unload_minutes | slot_minutes | slot |
-|---|---|---|---|
-| SH-13 | 90 | 60.0 | JAI-D2-12 |
+No rows. Clean on this snapshot.
 
-<details><summary>Query</summary>
+## 20. Load type and dock type mismatch
 
-```sql
-SELECT a.shipment_id, sh.unload_minutes,
-       ROUND((julianday(s.end_at) - julianday(s.start_at)) * 1440) AS slot_minutes, s.id AS slot
-FROM appointments a JOIN shipments sh ON sh.id = a.shipment_id JOIN slots s ON s.id = a.slot_id
-WHERE a.status = 'active'
-  AND sh.unload_minutes > ROUND((julianday(s.end_at) - julianday(s.start_at)) * 1440)
-```
+Why it matters: reefer loads need D5, heavy loads D6; clean in this snapshot.
 
-</details>
+No rows. Clean on this snapshot.
 
-## 11. Booking on an inactive dock
+## 21. Load over vehicle capacity, or reefer load on a non-reefer truck
 
-Why it matters: the dock is out of service.
+Why it matters: catches impossible assignments; clean in this snapshot.
 
-| shipment_id | dock | name |
-|---|---|---|
-| SH-14 | JAI-D5 | Jaipur Dock 5 |
+No rows. Clean on this snapshot.
 
-<details><summary>Query</summary>
+## 22. Load over 25 t not marked heavy (RULE004)
 
-```sql
-SELECT a.shipment_id, d.id AS dock, d.name
-FROM appointments a JOIN slots s ON s.id = a.slot_id JOIN docks d ON d.id = s.dock_id
-WHERE a.status = 'active' AND d.active = 0
-```
+Why it matters: such a load would be offered standard docks; clean in this snapshot.
 
-</details>
+No rows. Clean on this snapshot.
 
-## 12. Truck at the gate with no active appointment
+## 23. Timestamps not in +05:30
 
-Why it matters: it is waiting on site (detention) with nowhere to go.
+Why it matters: string comparison of times is only safe if every row uses the same offset; clean.
 
-| shipment_id | facility_id | gate_in_at |
-|---|---|---|
-| SH-15 | JAI-DC | 2026-08-04 07:50 |
-
-<details><summary>Query</summary>
-
-```sql
-SELECT g.shipment_id, g.facility_id, g.at AS gate_in_at
-FROM gate_events g
-WHERE g.event = 'gate_in'
-  AND NOT EXISTS (SELECT 1 FROM gate_events o WHERE o.shipment_id = g.shipment_id
-                  AND o.event = 'gate_out' AND o.at > g.at)
-  AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.shipment_id = g.shipment_id AND a.status = 'active')
-```
-
-</details>
-
-## 13. One phone number linked to more than one driver
-
-Why it matters: an incoming message cannot be matched to one shipment, so the agent must ask.
-
-| phone | drivers | who |
-|---|---|---|
-| +919800000018 | 2 | DR-18 Jignesh, DR-19 Hitesh |
-
-<details><summary>Query</summary>
-
-```sql
-SELECT phone, COUNT(*) AS drivers, GROUP_CONCAT(id || ' ' || name, ', ') AS who
-FROM drivers GROUP BY phone HAVING COUNT(*) > 1
-```
-
-</details>
-
-## 14. Open shipment with no ETA from any source
-
-Why it matters: neither the agent nor the scheduler can plan it.
-
-| id | facility_id | status |
-|---|---|---|
-| SH-16 | JAI-DC | in_transit |
-
-<details><summary>Query</summary>
-
-```sql
-SELECT sh.id, sh.facility_id, sh.status
-FROM shipments sh
-WHERE sh.status IN ('in_transit', 'arrived')
-  AND NOT EXISTS (SELECT 1 FROM eta_updates e WHERE e.shipment_id = sh.id)
-```
-
-</details>
-
-## 15. Driver's last confirmation points to a slot that is no longer booked
-
-Why it matters: a promise the driver believes but the database does not hold.
-
-| shipment_id | confirmed_slot | sent_at | actual_active_slot |
-|---|---|---|---|
-| SH-21 | AMD-A2-13 | 2026-08-04 04:05 | AMD-A2-15 |
-
-<details><summary>Query</summary>
-
-```sql
-WITH last_conf AS (
-  SELECT shipment_id, slot_id, sent_at,
-         ROW_NUMBER() OVER (PARTITION BY shipment_id ORDER BY sent_at DESC, id DESC) rn
-  FROM outbound_confirmations)
-SELECT c.shipment_id, c.slot_id AS confirmed_slot, c.sent_at, a.slot_id AS actual_active_slot
-FROM last_conf c
-LEFT JOIN appointments a ON a.shipment_id = c.shipment_id AND a.status = 'active'
-WHERE c.rn = 1 AND (a.slot_id IS NULL OR a.slot_id != c.slot_id)
-```
-
-</details>
+No rows. Clean on this snapshot.
