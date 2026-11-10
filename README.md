@@ -59,6 +59,8 @@ Optional LLM (without it, an offline reader is used and everything else works th
 - **Seeded cases:** 16 of 16 pass, from the tyre delay (SHP1012) to the cancelled shipment (SHP1019).
 - **Race:** 30 rounds × 6 drivers for the same slots: zero promised twice, zero false
   promises, zero double bookings.
+- **Live with the LLM on:** workflow 16/16, agent (LLM tool calling) 15/16, both with zero
+  false promises; see `DECISIONS.md` and `reports/eval_report.md`.
 
 ## Deploy
 

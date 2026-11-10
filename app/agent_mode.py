@@ -48,7 +48,9 @@ Use the tools to act. Rules:
 - After report_delay with delay_minutes, tell the driver the new ETA the tool returned.
 - Only call confirm_option after options were offered and the driver picked one.
 - If offer_slots finds nothing, the system has already escalated: tell the driver operations will call.
-- Don't ask for things the backend knows (truck type, load, weight, dock compatibility)."""
+- Don't ask for things the backend knows (truck type, load, weight, dock compatibility).
+- A booking marked PENDING is not confirmed: never tell the driver they are "all set" on it. After a delay,
+  call offer_slots so the driver gets slots that are actually held."""
 
 TOOLS = [
     {"type": "function", "function": {
@@ -250,7 +252,10 @@ class AgentService:
                     "driver_orders": [f"{c['order_reference']} ({c['origin_city']}, truck {c['reg_no']})" for c in cands],
                     "shipment_identified": sh["order_reference"] if sh else None,
                     "current_eta": tu.hhmm(eta["eta"]) if eta else None,
-                    "current_booking": f"{tu.hhmm(appt['slot_start_ts'])} at Dock {appt['dock_code']}" if appt else None,
+                    "current_booking": (f"{tu.hhmm(appt['slot_start_ts'])} at Dock {appt['dock_code']}"
+                                        + (" (PENDING warehouse confirmation, not confirmed)"
+                                           if appt["appointment_status"] == "PENDING_CONFIRMATION" else ""))
+                                       if appt else None,
                     "at_facility": bool(sh and tools.on_site(sh)),
                     "conversation_state": desk.state["state"],
                     "options_offered": [f"{i}. {tu.hhmm(o['start'])} - Dock {o['dock_code']}"

@@ -100,16 +100,48 @@ truck in the yard, invent a time, and loop; every attempt is refused.
 
 ## Other decisions
 
-### Workflow by default, agent as an option
+### Workflow by default, agent as an option: built both, measured both
 
 The LLM reads messages and words replies; code picks every step (`service.py`). Agent mode
 (`agent_mode.py`) lets the LLM choose tools through OpenRouter tool calling, over the same
-`Desk`, so both modes apply identical rules and leave the same audit trail. The live
-comparison on the stand-in data was: workflow 12/12, agent 11/12, both with zero false
-promises; the agent was about 35% slower and needed guards for things it tried
-(guessing an identity, computing its own ETA, offering slots to a truck at the gate).
-Workflow stays the default; rerun the comparison on the real data with
-`POST /admin/eval?mode=agent`.
+`Desk`, so both modes apply identical rules and leave the same audit trail.
+
+**Measured live on this snapshot** (Claude Haiku 4.5 via OpenRouter, 16 seeded cases +
+3 race rounds × 6 drivers; table in `reports/eval_report.md`):
+
+| | Workflow | Agent |
+|---|---|---|
+| Seeded cases passed | 16 / 16 | 15 / 16 (run 1: 13 / 16) |
+| False promises / double bookings | 0 / 0 | 0 / 0 |
+| Median time per message | 2.4 s | 2.4 s |
+| Tool calls chosen by the LLM per message | 0 | 1.1 |
+| Replies in LLM wording (passed the fact check) | 92% | 83% |
+
+**What the agent did, and what stopped it:**
+1. Asked "How late exactly? 30 minutes, or more?" for "Running 30 min late" (run 1). Fixed in the prompt.
+2. In run 1, "I reached late and am in the yard" was treated as a delay report by *our* agent
+   pre-step, which matched the word "late". It now uses the message reader's intent, like
+   the workflow. The evaluation found this bug in our code, not the model's.
+3. Told SHP1013 "you're all set" on its `PENDING_CONFIRMATION` booking (run 2). Nothing was
+   booked wrongly, but it overstated a pending booking. The backend facts and status replies
+   now say "pending warehouse confirmation", and the prompt forbids "all set" on it.
+4. Tried to record an ETA before the shipment was identified (live demo, DRV007). The tool
+   guard refused it, and the driver was asked which order.
+5. After the driver named the truck, it called `offer_slots` without re-recording the 12:00
+   ETA from the parked message. The workflow resumes the parked message and records it.
+
+Across all of this, no false promise and no double booking, because capacity and identity
+are guarded in code, not by the prompt. **Decision:** the workflow stays the default for the
+driver path (16/16, behaviour independent of prompt wording). Agent mode stays available
+(`"mode": "agent"`, `AGENT_MODE=agent`, UI toggle) as the base for open-ended operator
+requests where the steps can't be planned in advance. (The earlier comparison on the
+stand-in data showed the same pattern: workflow 12/12, agent 11/12.)
+
+**Capacity under a staggered wave.** With the LLM on, requests arrive spread over seconds,
+so the first driver can hold 2–3 of the few free slots while choosing. Live, 5 (workflow)
+and 3 (agent) of 18 race conversations got a slot, against about 3 per round offline. It
+stays correct, but slots sit held for 2 minutes. Next step: hold one option when 3 or fewer
+compatible slots are free.
 
 ### Write into the supplied tables, add only two
 

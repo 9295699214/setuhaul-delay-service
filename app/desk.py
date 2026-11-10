@@ -243,7 +243,8 @@ class Desk:
             return self.result("status", "You have no slot booked right now. When will you reach?")
         label = dock_label(appt["dock_code"], appt["dock_type"])
         self.facts = {**EMPTY_FACTS, "times": [tu.hhmm(appt["slot_start_ts"])], "docks": [label]}
-        return self.result("status", f"Your slot is {tu.hhmm(appt['slot_start_ts'])} at {label}.")
+        pending = " It is still pending warehouse confirmation." if appt["appointment_status"] == "PENDING_CONFIRMATION" else ""
+        return self.result("status", f"Your slot is {tu.hhmm(appt['slot_start_ts'])} at {label}.{pending}")
 
     def handle_on_site(self, sh: dict, intent: str) -> dict:
         """The gate has the truck: plan from now, never from a driver-declared ETA."""
