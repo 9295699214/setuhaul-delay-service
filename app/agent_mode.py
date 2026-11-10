@@ -43,7 +43,9 @@ Use the tools to act. Rules:
   earliest set; do not call report_delay.
 - If the driver is at the gate or in the yard, call offer_slots (the system plans from now) or
   get_booking_status. Do not ask for an ETA.
-- If the driver only says they are late without how late, ask how late. Never ask for the date.
+- "30 min late", "1 hour late", "do ghante late" ARE exact enough: call report_delay with
+  delay_minutes right away. Only ask how late if no amount is given at all. Never ask for the date.
+- After report_delay with delay_minutes, tell the driver the new ETA the tool returned.
 - Only call confirm_option after options were offered and the driver picked one.
 - If offer_slots finds nothing, the system has already escalated: tell the driver operations will call.
 - Don't ask for things the backend knows (truck type, load, weight, dock compatibility)."""
@@ -228,8 +230,11 @@ class AgentService:
                 desk.save()
                 desk.log("AGENT", res["reply"], res["action"].upper())
                 return {**res, "mode": "agent", "reply_source": "template", "tool_calls": []}
-            # same identity rule as the workflow (one open, named, or the only trip underway)
-            sh, _ = tools.resolve_shipment(cands, text, any(w in text.lower() for w in ("late", "delay", "der")))
+            # same identity rule as the workflow (one open, named, or the only trip underway), using the
+            # offline reader's intent; matching the word "late" misread "I reached late and am in the yard"
+            from .agent import rule_extract
+            is_delay = rule_extract(text, tu.simple(now)).intent == "report_delay"
+            sh, _ = tools.resolve_shipment(cands, text, is_delay)
             if sh:
                 desk.state["shipment_id"] = sh["shipment_id"]
                 desk.set_thread(shipment_id=sh["shipment_id"])
